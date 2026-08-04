@@ -235,6 +235,8 @@ def native_profile(name: str) -> dict:
 def clone_profile(name: str, session: str) -> Path:
     selected = native_profile(name)
     source = Path(selected["path"])
+    if profile_locked(source) and firefox_lock_stale(source):
+        clear_firefox_locks(source)
     if profile_locked(source):
         raise RuntimeError(f"Firefox profile is locked: {selected['name']}. Close Firefox first.")
     target = secure_directory(profile_home() / "temporary") / safe_session(session)
@@ -397,7 +399,14 @@ def managed_lock_path(name: str) -> Path:
 
 def process_alive(pid: object) -> bool:
     try:
-        os.kill(int(pid), 0)
+        pid = int(pid)
+        if sys.platform.startswith("linux"):
+            try:
+                if Path(f"/proc/{pid}/stat").read_text().split(") ", 1)[1].split()[0] == "Z":
+                    return False
+            except (OSError, IndexError):
+                pass
+        os.kill(pid, 0)
         return True
     except PermissionError:
         return True
@@ -411,6 +420,11 @@ def firefox_lock_stale(profile: Path) -> bool:
         return False
     match = re.search(r"\+(\d+)$", os.readlink(lock))
     return bool(match and not process_alive(match.group(1)))
+
+
+def clear_firefox_locks(profile: Path) -> None:
+    for name in PROFILE_LOCKS:
+        (profile / name).unlink(missing_ok=True)
 
 
 def acquire_managed_profile(name: str, session: str) -> Path:
@@ -429,7 +443,7 @@ def acquire_managed_profile(name: str, session: str) -> Path:
             raise RuntimeError(f"Managed Firefox profile is already being opened by session: {owner or 'unknown'}")
         lock.unlink(missing_ok=True)
     if profile_locked(profile) and firefox_lock_stale(profile):
-        clear_managed_firefox_locks(name)
+        clear_firefox_locks(profile)
     if profile_locked(profile):
         raise RuntimeError(f"Managed Firefox profile is locked: {name}. Close Firefox first.")
     try:
@@ -513,7 +527,6 @@ def start(session: str, profile: str | None = None) -> dict:
             raise RuntimeError(f"Session {session} is already running with another profile.")
         return current
     if current:
-        profile = profile or current.get("profile")
         stop(session, current)
     profile = resolve_profile(profile)
 
@@ -607,7 +620,6 @@ def active(session: str, profile: str | None = None) -> dict:
         call(state, "GET", "/url")
         return state
     except RuntimeError:
-        profile = profile or state.get("profile")
         stop(session, state)
         return start(session, profile)
 
@@ -807,6 +819,11 @@ def selftest() -> dict:
     created = parser.parse_args(["profile", "create", "work", "--from", "default-release"])
     assert created.profile_action == "create" and created.source == "default-release"
     assert validate_profile_name("work.1") == "work.1"
+    if sys.platform.startswith("linux"):
+        zombie = subprocess.Popen([sys.executable, "-c", "pass"])
+        time.sleep(0.1)
+        assert not process_alive(zombie.pid)
+        zombie.wait()
     try:
         validate_profile_name("../unsafe")
     except RuntimeError:

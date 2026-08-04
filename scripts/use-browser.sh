@@ -45,14 +45,21 @@ fi
 
 PROFILE="${TMPDIR:-/tmp}/browser-use-$BROWSER-$PORT"
 mkdir -p "$PROFILE"
-"$EXE" --remote-debugging-port="$PORT" --user-data-dir="$PROFILE" \
-       --no-first-run --no-default-browser-check >/dev/null 2>&1 &
+if command -v setsid >/dev/null 2>&1; then
+  setsid "$EXE" --remote-debugging-port="$PORT" --user-data-dir="$PROFILE" \
+         --no-first-run --no-default-browser-check >/dev/null 2>&1 &
+else
+  nohup "$EXE" --remote-debugging-port="$PORT" --user-data-dir="$PROFILE" \
+        --no-first-run --no-default-browser-check >/dev/null 2>&1 &
+fi
 
 CDP="http://127.0.0.1:$PORT"
+READY=false
 for _ in $(seq 1 30); do
-  if curl -fsS "$CDP/json/version" >/dev/null 2>&1; then break; fi
+  if curl -fsS "$CDP/json/version" >/dev/null 2>&1; then READY=true; break; fi
   sleep 0.3
 done
+$READY || { echo "Failed to launch $BROWSER: CDP did not become ready at $CDP" >&2; exit 4; }
 echo "Launched $BROWSER ($EXE)" >&2
 echo "Next: browser-use --cdp-url $CDP open <url>" >&2
 echo "$CDP"   # last line = CDP url

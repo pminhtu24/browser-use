@@ -62,9 +62,11 @@ Start-Process -FilePath $exe -ArgumentList @(
   '--no-first-run', '--no-default-browser-check') | Out-Null
 
 $cdp = "http://127.0.0.1:$Port"
+$ready = $false
 for ($i = 0; $i -lt 30; $i++) {
-  try { Invoke-WebRequest "$cdp/json/version" -UseBasicParsing -TimeoutSec 1 | Out-Null; break } catch { Start-Sleep -Milliseconds 300 }
+  try { Invoke-WebRequest "$cdp/json/version" -UseBasicParsing -TimeoutSec 1 | Out-Null; $ready = $true; break } catch { Start-Sleep -Milliseconds 300 }
 }
+if (-not $ready) { Write-Error "Failed to launch $Browser`: CDP did not become ready at $cdp"; exit 4 }
 Write-Host "Launched $Browser ($exe)"
 Write-Host "Next: browser-use --cdp-url $cdp open <url>"
 $cdp   # last line = CDP url (for scripting)

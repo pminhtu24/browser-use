@@ -136,15 +136,24 @@ scripts\use-browser.ps1 firefox
 ```
 
 Require installed Firefox and `geckodriver` on `PATH`, or set `FIREFOX_BINARY` and
-`GECKODRIVER`. Open a visible browser with the most recently used managed profile
-when one exists, otherwise use an isolated temporary profile. Do not claim to attach
-to a normally-open Firefox instance.
+`GECKODRIVER`. Open a visible browser with the most recently used managed profile;
+when none exists, automatically create and reuse an empty managed profile named
+`automation`. Do not claim to attach to a normally-open Firefox instance.
 
 Firefox supports three profile modes:
 
-- No `--profile`: reuse the most recently used managed profile, or use a clean temporary WebDriver profile when none exist.
+- No `--profile`: reuse the most recently used managed profile, or automatically create persistent managed profile `automation` when none exist.
 - `--profile NATIVE_NAME`: clone a closed native profile for this session, then delete the clone on close.
 - `--profile MANAGED_NAME`: reuse a persistent automation profile across browser restarts.
+
+By default, Firefox automation state lives under `${TMPDIR:-/tmp}/browser-use-firefox`.
+Managed profiles use the same temporary root on normal Firefox, but use the
+Snap/Flatpak-approved profile directory when sandboxed. Set `BROWSER_USE_HOME`
+and `FIREFOX_PROFILE_HOME` to override these locations.
+
+`profile list` recognizes both legacy `profiles.ini` names and modern Firefox Profile
+Groups names shown in the UI, such as `Work`; either native name can be passed to
+`--profile` and is cloned only after Firefox is closed.
 
 Create and manage persistent profiles without modifying the native source:
 

@@ -177,12 +177,16 @@ delete that temporary clone on close. Managed profiles live under
 `FIREFOX_PROFILE_HOME` (or a Firefox-accessible automatic location), survive `close`,
 and must be removed explicitly with `profile delete`.
 
+Native discovery supports both legacy `profiles.ini` names and modern Firefox
+Profile Groups names shown in the UI, such as `Work`.
+
 Managed names cannot collide with native names, and one managed profile cannot be
 opened by two sessions simultaneously. Creating from a native profile requires
 Firefox to be closed and never writes changes back to the source profile. Without
-`--profile`, reuse the most recently opened managed profile; if none exist, use a
-temporary profile. An explicit managed profile becomes the default for the next
-automatic launch. Report a selected profile lock instead of switching accounts.
+`--profile`, reuse the most recently opened managed profile; if none exist,
+automatically create the persistent managed profile `automation`. An explicit managed
+profile becomes the default for the next automatic launch. Report a selected profile
+lock instead of switching accounts.
 
 On Linux, headed Firefox requires `DISPLAY` or `WAYLAND_DISPLAY`. If the tool runner
 filters GUI variables, forward `DISPLAY`, `XAUTHORITY`, and `DBUS_SESSION_BUS_ADDRESS`;

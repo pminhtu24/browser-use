@@ -12,6 +12,7 @@ import re
 import shutil
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -33,7 +34,7 @@ KEYS = {
 
 
 def home() -> Path:
-    root = Path(os.environ.get("BROWSER_USE_HOME", Path.home() / ".browser-use")) / "firefox"
+    root = Path(os.environ.get("BROWSER_USE_HOME", tempfile.gettempdir() + "/browser-use-firefox")) / "firefox"
     root.mkdir(parents=True, exist_ok=True)
     return root
 
@@ -152,7 +153,7 @@ def profile_home() -> Path:
     elif installation == "flatpak":
         root = Path.home() / ".var" / "app" / "org.mozilla.firefox" / ".browser-use-profiles"
     else:
-        root = home() / "profile-data"
+        root = Path(os.environ.get("TMPDIR", tempfile.gettempdir())) / "browser-use-firefox" / "profiles"
     return secure_directory(root)
 
 
@@ -173,6 +174,7 @@ def firefox_profiles() -> list[dict]:
     config = configparser.ConfigParser()
     config.read(ini, encoding="utf-8")
     profiles = []
+    stores = set()
     for section in config.sections():
         if not section.startswith("Profile") or "Path" not in config[section]:
             continue
@@ -180,10 +182,34 @@ def firefox_profiles() -> list[dict]:
         path = Path(value["Path"])
         if value.get("IsRelative", "1") == "1":
             path = ini.parent / path
+        if value.get("StoreID"):
+            stores.add(value["StoreID"])
         profiles.append({
             "kind": "native", "name": value.get("Name", section), "path": str(path),
             "default": value.get("Default") == "1", "locked": profile_locked(path),
         })
+    default_paths = {Path(item["path"]).resolve() for item in profiles if item["default"]}
+    grouped = []
+    for store in stores:
+        database = ini.parent / "Profile Groups" / f"{store}.sqlite"
+        if not database.is_file():
+            continue
+        try:
+            with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+                rows = connection.execute("SELECT path, name FROM Profiles ORDER BY id").fetchall()
+        except (OSError, sqlite3.Error):
+            continue
+        for raw_path, name in rows:
+            path = Path(raw_path)
+            if not path.is_absolute():
+                path = ini.parent / path
+            grouped.append({
+                "kind": "native", "name": name, "path": str(path),
+                "default": path.resolve() in default_paths, "locked": profile_locked(path),
+            })
+    if grouped:
+        grouped_paths = {Path(item["path"]).resolve() for item in grouped}
+        return grouped + [item for item in profiles if Path(item["path"]).resolve() not in grouped_paths]
     return profiles
 
 
@@ -255,7 +281,8 @@ def resolve_profile(profile: str | None) -> str | None:
         return profile
     profiles = managed_profiles()
     if not profiles:
-        return None
+        create_managed_profile("automation", None)
+        return "automation"
     def timestamp(value) -> int | float:
         return value if isinstance(value, (int, float)) else 0
 
@@ -810,8 +837,26 @@ def selftest() -> dict:
             assert resolve_profile("social") == "social"
             assert delete_managed_profile("social") == {"deleted": "social"}
             assert delete_managed_profile("work") == {"deleted": "work"}
-            assert resolve_profile(None) is None
+            assert resolve_profile(None) == "automation"
+            assert managed_profiles()[0]["name"] == "automation"
             assert source.joinpath("marker.txt").read_text(encoding="utf-8") == "native"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "original").mkdir()
+            (root / "work").mkdir()
+            groups = root / "Profile Groups"
+            groups.mkdir()
+            ini = root / "profiles.ini"
+            ini.write_text("[Profile0]\nName=default\nIsRelative=1\nPath=work\nDefault=1\nStoreID=test\n", encoding="utf-8")
+            with sqlite3.connect(groups / "test.sqlite") as connection:
+                connection.execute("CREATE TABLE Profiles (id INTEGER PRIMARY KEY, path TEXT, name TEXT)")
+                connection.executemany("INSERT INTO Profiles (path, name) VALUES (?, ?)", [
+                    ("original", "Original profile"), ("work", "Work"),
+                ])
+            os.environ["FIREFOX_PROFILES_INI"] = str(ini)
+            assert [item["name"] for item in firefox_profiles()] == ["Original profile", "Work"]
+            assert native_profile("Work")["path"] == str(root / "work")
+            assert native_profile("default")["name"] == "Work"
     finally:
         for key, value in previous.items():
             if value is None:

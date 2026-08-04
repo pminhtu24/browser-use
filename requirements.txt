@@ -1,0 +1,16 @@
+# Python dependency for the browser-use skill — installed OFFLINE at first run
+# from the bundled wheelhouse:
+#   pip install --no-index --find-links <wheels> -r requirements.txt
+#
+# Pinned pure-Python line (0.12.x): drives Chromium-family browsers via CDP.
+# Firefox uses scripts/firefox-use.py plus an installed geckodriver, with no
+# additional Python dependency, Node runtime, Playwright, or browser download.
+#
+# ⚠️ BUILD NOTE (air-gapped wheelhouse): gather these wheels ON A WINDOWS HOST with
+# NATIVE pip (NOT `pip download --platform win_amd64` on macOS/Linux). A transitive
+# dep, `screeninfo`, declares `pyobjc-framework-Cocoa; sys_platform == "darwin"`,
+# which cross-download cannot skip (it has no Windows wheel) and aborts the whole
+# resolve. On a real Windows box the `darwin` marker is false, so pyobjc is skipped
+# and every Windows wheel resolves cleanly:
+#   py -3.12 -m pip download -r requirements.txt --only-binary=:all: -d <wheels>
+browser-use==0.12.6

@@ -1,0 +1,37 @@
+{
+  "slug": "browser-use",
+  "skillVersion": "1.1.2",
+  "pinnedToolVersion": "0.12.6",
+  "setupComplete": false,
+  "prerequisites": {
+    "python": {
+      "required": true,
+      "installed": false,
+      "description": "Python >=3.11,<4.0 (NetClaw ships CPython 3.12 — reuse it)"
+    },
+    "browserUseCli": {
+      "required": true,
+      "installed": false,
+      "description": "browser-use==0.12.6 installed via pip (provides `browser-use`/`bu`). Pure Python — no Node/npm, no Playwright."
+    },
+    "systemBrowser": {
+      "required": true,
+      "installed": false,
+      "description": "An installed Chromium-family browser for CDP, or Firefox plus geckodriver for local WebDriver automation."
+    },
+    "hardening": {
+      "required": true,
+      "configured": false,
+      "description": "Telemetry + cloud disabled (see .env.example)"
+    }
+  },
+  "install": {
+    "windows": "scripts/setup.ps1",
+    "unix": "scripts/setup.sh",
+    "offline": "On a connected machine run `pip download browser-use==0.12.6 -d <folder>` (57 pure-python/small wheels, no Rust, no Playwright). Ship <folder> and point NETCLAW_WHEELHOUSE at it; setup installs with pip --no-index.",
+    "online": "If a proxy exists, setup falls back to `pip install browser-use==0.12.6`.",
+    "browser": "NO browser download needed. Chromium uses scripts/use-browser plus browser-use CDP; Firefox uses scripts/firefox-use.py plus installed geckodriver."
+  },
+  "verifySetup": "browser-use doctor && python scripts/firefox-use.py doctor",
+  "notes": "Version 1.1.2. Hardened for air-gapped machines: no telemetry, cloud, tunnels, or browser download. Chromium uses CDP unchanged; Firefox adds managed persistent profiles over loopback WebDriver."
+}

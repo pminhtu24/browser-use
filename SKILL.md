@@ -157,8 +157,9 @@ Firefox supports three profile modes:
 - `--profile MANAGED_NAME`: reuse a persistent automation profile across browser restarts.
 
 By default, Firefox automation state and managed profiles live under
-`.browser-use-state` and `.firefox-profiles` in this package. Set `BROWSER_USE_HOME`
-and `FIREFOX_PROFILE_HOME` to override these locations.
+`.firefox-use-state` and `.firefox-profiles` in this package. Set `FIREFOX_STATE_HOME`
+and `FIREFOX_PROFILE_HOME` to override these locations (`BROWSER_USE_HOME` remains a
+backward-compatible state alias).
 
 `profile list` recognizes both legacy `profiles.ini` names and modern Firefox Profile
 Groups names shown in the UI, such as `Work`; either native name can be passed to

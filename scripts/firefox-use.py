@@ -35,7 +35,8 @@ KEYS = {
 
 
 def home() -> Path:
-    root = Path(os.environ.get("BROWSER_USE_HOME") or PROJECT_ROOT / ".browser-use-state") / "firefox"
+    configured = os.environ.get("FIREFOX_STATE_HOME") or os.environ.get("BROWSER_USE_HOME")
+    root = Path(configured) / "firefox" if configured else PROJECT_ROOT / ".firefox-use-state"
     root.mkdir(parents=True, exist_ok=True)
     return root
 
@@ -802,7 +803,7 @@ def selftest() -> dict:
         pass
     else:
         raise AssertionError("unsafe profile name accepted")
-    previous = {key: os.environ.get(key) for key in ("BROWSER_USE_HOME", "FIREFOX_PROFILE_HOME", "FIREFOX_PROFILES_INI")}
+    previous = {key: os.environ.get(key) for key in ("FIREFOX_STATE_HOME", "BROWSER_USE_HOME", "FIREFOX_PROFILE_HOME", "FIREFOX_PROFILES_INI")}
     try:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -812,7 +813,7 @@ def selftest() -> dict:
             ini = root / "profiles.ini"
             ini.write_text("[Profile0]\nName=default-release\nIsRelative=0\nPath=" + str(source) + "\nDefault=1\n", encoding="utf-8")
             os.environ.update({
-                "BROWSER_USE_HOME": str(root / "state"),
+                "FIREFOX_STATE_HOME": str(root / "state"),
                 "FIREFOX_PROFILE_HOME": str(root / "profiles"),
                 "FIREFOX_PROFILES_INI": str(ini),
             })

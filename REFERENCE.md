@@ -118,7 +118,7 @@ browser-use profile list                  # list installed Chrome profiles (for 
 
 ---
 
-# Firefox CLI reference (skill 1.1.2)
+# Firefox CLI reference (skill 1.2.0)
 
 Use `scripts/firefox-use.py` for Firefox. It speaks local W3C WebDriver through the
 bundled Windows x64 geckodriver, `GECKODRIVER`, or a driver on `PATH`, in that order,

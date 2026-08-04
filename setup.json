@@ -1,6 +1,6 @@
 {
   "slug": "browser-use",
-  "skillVersion": "1.1.2",
+  "skillVersion": "1.2.0",
   "pinnedToolVersion": "0.12.6",
   "bundledGeckodriver": {
     "version": "0.37.1",
@@ -41,5 +41,5 @@
     "browser": "NO browser or driver download needed. Chromium uses scripts/use-browser plus browser-use CDP; Firefox on Windows x64 uses the bundled pinned geckodriver."
   },
   "verifySetup": "browser-use doctor && python scripts/firefox-use.py doctor",
-  "notes": "Version 1.1.2. Hardened for air-gapped machines: no telemetry, cloud, tunnels, browser download, or Windows x64 driver download. Chromium uses CDP unchanged; Firefox adds managed persistent profiles over loopback WebDriver."
+  "notes": "Version 1.2.0. Hardened for air-gapped machines: no telemetry, cloud, tunnels, browser download, or Windows x64 driver download. Chromium uses CDP unchanged; Firefox adds managed persistent profiles over loopback WebDriver."
 }

@@ -10,7 +10,7 @@ the `browser-use` CLI over Chrome DevTools Protocol (CDP); Firefox uses the bund
 `scripts/firefox-use.py` helper over local WebDriver. Both paths use installed browsers:
 **pure Python, no Node/npm, no Playwright download.** Safe for internal / air-gapped machines.
 
-> **Pinned tool version:** `browser-use==0.12.6` · **Skill version:** `1.1.2`
+> **Pinned tool version:** `browser-use==0.12.6` · **Skill version:** `1.2.0`
 > To bump, see [Updating](#updating).
 
 ## Security posture (READ FIRST — enterprise hardened)

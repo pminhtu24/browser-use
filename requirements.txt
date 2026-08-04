@@ -3,8 +3,8 @@
 #   pip install --no-index --find-links <wheels> -r requirements.txt
 #
 # Pinned pure-Python line (0.12.x): drives Chromium-family browsers via CDP.
-# Firefox uses scripts/firefox-use.py plus an installed geckodriver, with no
-# additional Python dependency, Node runtime, Playwright, or browser download.
+# Firefox uses scripts/firefox-use.py plus bundled geckodriver on Windows x64 (or an
+# installed driver elsewhere), with no additional Python dependency or browser download.
 #
 # ⚠️ BUILD NOTE (air-gapped wheelhouse): gather these wheels ON A WINDOWS HOST with
 # NATIVE pip (NOT `pip download --platform win_amd64` on macOS/Linux). A transitive

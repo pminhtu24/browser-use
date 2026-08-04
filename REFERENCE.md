@@ -106,8 +106,10 @@ browser-use profile list                  # list installed Chrome profiles (for 
 
 # Firefox CLI reference (skill 1.1.2)
 
-Use `scripts/firefox-use.py` for Firefox. It speaks local W3C WebDriver through an
-installed geckodriver and keeps the same deterministic, index-based workflow.
+Use `scripts/firefox-use.py` for Firefox. It speaks local W3C WebDriver through the
+bundled Windows x64 geckodriver, `GECKODRIVER`, or a driver on `PATH`, in that order,
+and keeps the same deterministic, index-based workflow. The bundled driver requires
+no runtime download, installation, `PATH` change, or administrator access.
 
 Global options must precede the command:
 

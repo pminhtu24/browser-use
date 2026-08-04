@@ -125,6 +125,10 @@ def find_firefox() -> str | None:
 def find_geckodriver() -> str | None:
     if configured := os.environ.get("GECKODRIVER"):
         return configured if Path(configured).is_file() else shutil.which(configured)
+    if os.name == "nt":
+        bundled = Path(__file__).resolve().parent.parent / "vendor" / "geckodriver" / "windows-x64" / "geckodriver.exe"
+        if bundled.is_file():
+            return str(bundled)
     return shutil.which("geckodriver")
 
 

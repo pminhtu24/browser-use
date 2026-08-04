@@ -135,10 +135,13 @@ scripts\use-browser.ps1 firefox
 & $env:NETCLAW_PYTHON scripts\firefox-use.py state
 ```
 
-Require installed Firefox and `geckodriver` on `PATH`, or set `FIREFOX_BINARY` and
-`GECKODRIVER`. Open a visible browser with the most recently used managed profile;
-when none exists, automatically create and reuse an empty managed profile named
-`automation`. Do not claim to attach to a normally-open Firefox instance.
+Require installed Firefox. On Windows x64, use the bundled geckodriver without a
+download, installation, `PATH` change, or administrator access. `GECKODRIVER` may
+override it; Linux and macOS continue to use `geckodriver` on `PATH`. Set
+`FIREFOX_BINARY` for a non-standard Firefox location. Open a visible browser with the
+most recently used managed profile; when none exists, automatically create and reuse
+an empty managed profile named `automation`. Do not claim to attach to a normally-open
+Firefox instance.
 
 Firefox supports three profile modes:
 
@@ -206,6 +209,7 @@ On Linux, headed mode requires `DISPLAY` or `WAYLAND_DISPLAY`.
 ### Firefox
 
 - Run `scripts/firefox-use.py doctor` to verify Firefox, geckodriver, profile storage, and display readiness.
+- On Windows x64, keep `vendor/geckodriver/windows-x64/geckodriver.exe` with the skill; never download a driver at runtime.
 - If a native profile is locked, close normal Firefox before cloning it.
 - If an element index is stale, run `state` again instead of retrying the old index.
 

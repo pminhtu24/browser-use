@@ -1,9 +1,11 @@
 # browser-use skill — Windows setup (company / air-gapped friendly)
 # Installs browser-use==<pinned> and applies the enterprise hardening env vars.
-# Prefers an offline wheelhouse + pre-bundled Playwright browsers when provided.
+# Prefers an offline wheelhouse and verifies the bundled Windows x64 geckodriver.
 
 $ErrorActionPreference = 'Stop'
 $PinnedVersion = '0.12.6'
+$BundledGeckodriverVersion = '0.37.1'
+$BundledGeckodriverSha256 = 'e95b4eac7960ffcd5acbfd92bb7d49d48f99c1d01a20ddd297fef8c80821020d'
 
 # --- 1. Hardening: disable telemetry / cloud / version-check (process + user) ---
 $hardening = @{
@@ -37,12 +39,21 @@ if ($env:NETCLAW_WHEELHOUSE -and (Test-Path $env:NETCLAW_WHEELHOUSE)) {
 }
 
 # --- 4. Browser drivers: no downloads ---
-Write-Host '  browser: Chromium uses CDP; Firefox uses installed geckodriver'
+$bundledGeckodriver = Join-Path (Split-Path $PSScriptRoot -Parent) 'vendor\geckodriver\windows-x64\geckodriver.exe'
+if (-not (Test-Path -LiteralPath $bundledGeckodriver)) {
+  throw "Bundled geckodriver not found: $bundledGeckodriver"
+}
+$actualGeckodriverSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $bundledGeckodriver).Hash.ToLowerInvariant()
+if ($actualGeckodriverSha256 -ne $BundledGeckodriverSha256) {
+  throw "Bundled geckodriver checksum mismatch: $actualGeckodriverSha256"
+}
+$geckodriverVersion = & $bundledGeckodriver --version 2>&1 | Select-Object -First 1
+if ($LASTEXITCODE -ne 0 -or $geckodriverVersion -notmatch "geckodriver $BundledGeckodriverVersion") {
+  throw "Bundled geckodriver version check failed: $geckodriverVersion"
+}
+Write-Host "  browser: Chromium uses CDP; Firefox uses bundled $geckodriverVersion"
 if (-not $env:FIREFOX_BINARY -and -not (Get-Command firefox -ErrorAction SilentlyContinue)) {
   Write-Warning 'Firefox not found; set FIREFOX_BINARY.'
-}
-if (-not $env:GECKODRIVER -and -not (Get-Command geckodriver -ErrorAction SilentlyContinue)) {
-  Write-Warning 'geckodriver not found; set GECKODRIVER.'
 }
 
 # --- 5. Verify ---

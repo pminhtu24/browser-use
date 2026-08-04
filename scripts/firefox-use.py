@@ -25,6 +25,7 @@ from urllib.request import Request, urlopen
 ELEMENT_KEY = "element-6066-11e4-a52e-4f735466cecf"
 PROFILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 PROFILE_LOCKS = ("parent.lock", ".parentlock", "lock")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 KEYS = {
     "Null": "\ue000", "Backspace": "\ue003", "Tab": "\ue004", "Enter": "\ue007",
     "Shift": "\ue008", "Control": "\ue009", "Alt": "\ue00a", "Escape": "\ue00c",
@@ -34,7 +35,7 @@ KEYS = {
 
 
 def home() -> Path:
-    root = Path(os.environ.get("BROWSER_USE_HOME", tempfile.gettempdir() + "/browser-use-firefox")) / "firefox"
+    root = Path(os.environ.get("BROWSER_USE_HOME") or PROJECT_ROOT / ".browser-use-state") / "firefox"
     root.mkdir(parents=True, exist_ok=True)
     return root
 
@@ -151,14 +152,7 @@ def profile_ini() -> Path | None:
 def profile_home() -> Path:
     if configured := os.environ.get("FIREFOX_PROFILE_HOME"):
         return secure_directory(Path(configured).expanduser())
-    installation = firefox_installation()
-    if installation == "snap":
-        root = Path.home() / "snap" / "firefox" / "common" / ".browser-use-profiles"
-    elif installation == "flatpak":
-        root = Path.home() / ".var" / "app" / "org.mozilla.firefox" / ".browser-use-profiles"
-    else:
-        root = Path(os.environ.get("TMPDIR", tempfile.gettempdir())) / "browser-use-firefox" / "profiles"
-    return secure_directory(root)
+    return secure_directory(PROJECT_ROOT / ".firefox-profiles")
 
 
 def validate_profile_name(name: str) -> str:
@@ -283,18 +277,9 @@ def managed_profiles() -> list[dict]:
 def resolve_profile(profile: str | None) -> str | None:
     if profile:
         return profile
-    profiles = managed_profiles()
-    if not profiles:
+    if not managed_dir("automation").is_dir():
         create_managed_profile("automation", None)
-        return "automation"
-    def timestamp(value) -> int | float:
-        return value if isinstance(value, (int, float)) else 0
-
-    def recency(item: dict) -> tuple:
-        metadata = managed_metadata(managed_dir(item["name"]))
-        return -timestamp(metadata.get("lastUsedAt")), -timestamp(metadata.get("createdAt")), item["name"].casefold()
-
-    return min(profiles, key=recency)["name"]
+    return "automation"
 
 
 def mark_managed_profile_used(name: str) -> None:
@@ -833,11 +818,11 @@ def selftest() -> dict:
             })
             created_profile = create_managed_profile("work", "default-release")
             assert Path(created_profile["path"], "marker.txt").read_text(encoding="utf-8") == "native"
-            assert resolve_profile(None) == "work"
+            assert resolve_profile(None) == "automation"
             create_managed_profile("social", None)
-            assert resolve_profile(None) == "social"
+            assert resolve_profile(None) == "automation"
             mark_managed_profile_used("work")
-            assert resolve_profile(None) == "work"
+            assert resolve_profile(None) == "automation"
             assert resolve_profile("social") == "social"
             assert delete_managed_profile("social") == {"deleted": "social"}
             assert delete_managed_profile("work") == {"deleted": "work"}

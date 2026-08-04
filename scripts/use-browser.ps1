@@ -1,8 +1,8 @@
 # use-browser.ps1 — launch a Chromium-family browser with remote debugging, then
 # print a CDP url for:  browser-use --cdp-url <url> open <site>
 #
-#   scripts\use-browser.ps1 chrome          # or: edge | coccoc | brave
-#   scripts\use-browser.ps1 edge 9333        # custom port
+#   powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\scripts\use-browser.ps1" chrome
+#   powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\scripts\use-browser.ps1" edge 9333
 #
 # Detection mirrors the engine's fast `browser_open` tool: env vars WITH hardcoded
 # fallbacks, plus the Windows "App Paths" registry and PATH — so it finds the
@@ -39,10 +39,10 @@ function Find-Exe([string[]]$paths, [string]$exeName) {
 switch ($Browser) {
   'safari'  { Write-Error "Safari is NOT supported (WebKit, no Chromium CDP). Use chrome/edge/coccoc/brave/opera."; exit 2 }
   'firefox' {
-    $python = if ($env:NETCLAW_PYTHON) { $env:NETCLAW_PYTHON } else {
+    $python = if ($env:BROWSER_USE_PYTHON) { $env:BROWSER_USE_PYTHON } else {
       @('python', 'python3', 'py') | Where-Object { Get-Command $_ -ErrorAction SilentlyContinue } | Select-Object -First 1
     }
-    if (-not $python) { Write-Error 'Python not found. Set NETCLAW_PYTHON.'; exit 3 }
+    if (-not $python) { Write-Error 'Python not found. Set BROWSER_USE_PYTHON.'; exit 3 }
     & $python (Join-Path $PSScriptRoot 'firefox-use.py') start
     exit $LASTEXITCODE
   }

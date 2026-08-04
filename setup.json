@@ -15,7 +15,7 @@
     "python": {
       "required": true,
       "installed": false,
-      "description": "Python >=3.11,<4.0 (NetClaw ships CPython 3.12 — reuse it)"
+      "description": "Python >=3.11,<4.0"
     },
     "browserUseCli": {
       "required": true,
@@ -34,9 +34,9 @@
     }
   },
   "install": {
-    "windows": "scripts/setup.ps1",
+    "windows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\setup.ps1",
     "unix": "scripts/setup.sh",
-    "offline": "On a connected machine run `pip download browser-use==0.12.6 -d <folder>` (57 pure-python/small wheels, no Rust, no Playwright). Ship <folder> and point NETCLAW_WHEELHOUSE at it; setup installs with pip --no-index.",
+    "offline": "On a connected machine run `pip download browser-use==0.12.6 -d <folder>` (57 pure-python/small wheels, no Rust, no Playwright). Set BROWSER_USE_WHEELHOUSE to that folder; setup installs with pip --no-index.",
     "online": "If a proxy exists, setup falls back to `pip install browser-use==0.12.6`.",
     "browser": "NO browser or driver download needed. Chromium uses scripts/use-browser plus browser-use CDP; Firefox on Windows x64 uses the bundled pinned geckodriver."
   },

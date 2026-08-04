@@ -42,12 +42,20 @@ download (fails air-gapped). That is the #1 mistake; don't make it.
 ```bash
 # 1) Launch the browser the user named — VISIBLE, with remote debugging.
 #    Prints a CDP url on its LAST line.  Options: chrome | edge | coccoc | brave | opera
-scripts/use-browser.sh  edge          # macOS/Linux   (Windows: scripts\use-browser.ps1 edge)
+scripts/use-browser.sh edge           # macOS/Linux
 
 # 2) Attach browser-use to THAT browser (reuse the CDP url it printed) and work:
 browser-use --cdp-url http://127.0.0.1:9222 open https://example.com
 browser-use state
 browser-use click 5
+```
+
+On Windows, execute the `.ps1` through PowerShell; never open or double-click it:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\scripts\use-browser.ps1" edge
+browser-use --cdp-url http://127.0.0.1:9222 open https://example.com
+browser-use state
 ```
 
 **Rules:**
@@ -130,28 +138,26 @@ scripts/firefox-use.py click 5
 On Windows:
 
 ```powershell
-scripts\use-browser.ps1 firefox
-& $env:NETCLAW_PYTHON scripts\firefox-use.py open https://example.com
-& $env:NETCLAW_PYTHON scripts\firefox-use.py state
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\scripts\use-browser.ps1" firefox
+& "$env:BROWSER_USE_PYTHON" ".\scripts\firefox-use.py" open https://example.com
+& "$env:BROWSER_USE_PYTHON" ".\scripts\firefox-use.py" state
 ```
 
 Require installed Firefox. On Windows x64, use the bundled geckodriver without a
 download, installation, `PATH` change, or administrator access. `GECKODRIVER` may
 override it; Linux and macOS continue to use `geckodriver` on `PATH`. Set
 `FIREFOX_BINARY` for a non-standard Firefox location. Open a visible browser with the
-most recently used managed profile; when none exists, automatically create and reuse
-an empty managed profile named `automation`. Do not claim to attach to a normally-open
+managed profile named `automation`; create it automatically when absent. Do not claim to attach to a normally-open
 Firefox instance.
 
 Firefox supports three profile modes:
 
-- No `--profile`: reuse the most recently used managed profile, or automatically create persistent managed profile `automation` when none exist.
+- No `--profile`: always reuse the persistent managed profile `automation`, creating it when absent.
 - `--profile NATIVE_NAME`: clone a closed native profile for this session, then delete the clone on close.
 - `--profile MANAGED_NAME`: reuse a persistent automation profile across browser restarts.
 
-By default, Firefox automation state lives under `${TMPDIR:-/tmp}/browser-use-firefox`.
-Managed profiles use the same temporary root on normal Firefox, but use the
-Snap/Flatpak-approved profile directory when sandboxed. Set `BROWSER_USE_HOME`
+By default, Firefox automation state and managed profiles live under
+`.browser-use-state` and `.firefox-profiles` in this package. Set `BROWSER_USE_HOME`
 and `FIREFOX_PROFILE_HOME` to override these locations.
 
 `profile list` recognizes both legacy `profiles.ini` names and modern Firefox Profile
@@ -173,10 +179,9 @@ managed profile may be used by only one session at a time. `close` preserves man
 profiles; `profile delete` removes them. Managed profiles contain sensitive cookies
 and login tokens, so protect their storage like a native browser profile.
 
-Reuse the same `--session` to continue controlling an existing Firefox window. When
-multiple managed profiles exist, automatically reuse the most recently opened one.
-An explicit `--profile NAME` always wins and becomes the default for the next automatic
-launch. If the selected profile is locked, report the lock instead of switching accounts.
+Reuse the same `--session` to continue controlling an existing Firefox window. An
+explicit `--profile NAME` applies only to that launch; later automatic launches return
+to `automation`. If the selected profile is locked, report the lock instead of switching accounts.
 
 Run `state` before every indexed interaction and again after navigation, tab switches,
 or DOM updates. Use `state`, `get text`, scoped `get html`, or `eval` to read pages;
@@ -187,7 +192,7 @@ explicitly requests an image file, and always pass a path.
 scripts/firefox-use.py state
 scripts/firefox-use.py get text 3
 scripts/firefox-use.py get html --selector main
-scripts/firefox-use.py input 4 "NetClaw"
+scripts/firefox-use.py input 4 "browser-use"
 scripts/firefox-use.py screenshot ./shot.png
 scripts/firefox-use.py close
 ```
@@ -201,6 +206,8 @@ On Linux, headed mode requires `DISPLAY` or `WAYLAND_DISPLAY`.
 ### Chromium
 
 - `doctor` says not installed → run `scripts/setup` (see [setup.json](setup.json)).
+- Windows asks how to open `use-browser.ps1` → it was opened as a document. Run it
+  with `powershell.exe -NoProfile -ExecutionPolicy Bypass -File` as shown above.
 - "Could not find Chrome" / tries to download Chromium → you skipped step 1; launch
   the browser with `scripts/use-browser …` and attach via `--cdp-url` (never run
   `browser-use install` on an air-gapped machine — it downloads Chromium).

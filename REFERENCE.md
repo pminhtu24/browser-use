@@ -19,6 +19,20 @@ exist upstream but are **disabled on purpose** — see
 > `scripts/use-browser …` and attaching with `--cdp-url` (Chrome/Edge), or use
 > `--profile` for the installed Chrome. See SKILL.md → "Choosing the browser".
 
+On Windows, never open a `.ps1` directly. Execute setup and browser launchers with
+PowerShell so Windows does not show the “Open with” dialog:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\scripts\setup.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\scripts\use-browser.ps1" chrome
+```
+
+Invoke Firefox commands through Python, not by opening the `.py` file:
+
+```powershell
+& "$env:BROWSER_USE_PYTHON" ".\scripts\firefox-use.py" state
+```
+
 ## Navigation
 
 ```bash
@@ -176,7 +190,7 @@ covers origins visited by that Firefox session.
 `profile list` marks Firefox-owned profiles as `native` and persistent automation
 profiles as `managed`. Native names clone the closed source for one session and
 delete that temporary clone on close. Managed profiles live under
-`FIREFOX_PROFILE_HOME` (or a Firefox-accessible automatic location), survive `close`,
+`FIREFOX_PROFILE_HOME` (or `.firefox-profiles` in this package), survive `close`,
 and must be removed explicitly with `profile delete`.
 
 Native discovery supports both legacy `profiles.ini` names and modern Firefox
@@ -185,10 +199,9 @@ Profile Groups names shown in the UI, such as `Work`.
 Managed names cannot collide with native names, and one managed profile cannot be
 opened by two sessions simultaneously. Creating from a native profile requires
 Firefox to be closed and never writes changes back to the source profile. Without
-`--profile`, reuse the most recently opened managed profile; if none exist,
-automatically create the persistent managed profile `automation`. An explicit managed
-profile becomes the default for the next automatic launch. Report a selected profile
-lock instead of switching accounts.
+`--profile`, always reuse the persistent managed profile `automation`, creating it when
+absent. An explicit managed profile applies only to that launch. Report a selected
+profile lock instead of switching accounts.
 
 On Linux, headed Firefox requires `DISPLAY` or `WAYLAND_DISPLAY`. If the tool runner
 filters GUI variables, forward `DISPLAY`, `XAUTHORITY`, and `DBUS_SESSION_BUS_ADDRESS`;

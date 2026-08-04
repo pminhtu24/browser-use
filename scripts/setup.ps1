@@ -21,20 +21,20 @@ foreach ($k in $hardening.Keys) {
 # Never leave a cloud key around.
 [Environment]::SetEnvironmentVariable('BROWSER_USE_API_KEY', $null, 'User')
 
-# --- 2. Pick a Python (reuse NetClaw's bundled CPython if we can find it) ---
+# --- 2. Pick a Python ---
 $python = $null
-foreach ($cand in @($env:NETCLAW_PYTHON, 'python', 'python3', 'py')) {
+foreach ($cand in @($env:BROWSER_USE_PYTHON, 'python', 'python3', 'py')) {
   if ($cand -and (Get-Command $cand -ErrorAction SilentlyContinue)) { $python = $cand; break }
 }
-if (-not $python) { throw 'No Python found. Set NETCLAW_PYTHON to the bundled python.exe.' }
+if (-not $python) { throw 'No Python found. Set BROWSER_USE_PYTHON to the bundled python.exe.' }
 Write-Host "  using python: $python"
 
 # --- 3. Install browser-use (offline wheelhouse first, else online) ---
-if ($env:NETCLAW_WHEELHOUSE -and (Test-Path $env:NETCLAW_WHEELHOUSE)) {
-  Write-Host "  installing browser-use==$PinnedVersion from wheelhouse $env:NETCLAW_WHEELHOUSE"
-  & $python -m pip install --no-index --find-links "$env:NETCLAW_WHEELHOUSE" "browser-use==$PinnedVersion"
+if ($env:BROWSER_USE_WHEELHOUSE -and (Test-Path $env:BROWSER_USE_WHEELHOUSE)) {
+  Write-Host "  installing browser-use==$PinnedVersion from wheelhouse $env:BROWSER_USE_WHEELHOUSE"
+  & $python -m pip install --no-index --find-links "$env:BROWSER_USE_WHEELHOUSE" "browser-use==$PinnedVersion"
 } else {
-  Write-Host "  no NETCLAW_WHEELHOUSE set -> online install (needs a proxy)"
+  Write-Host "  no BROWSER_USE_WHEELHOUSE set -> online install (needs a proxy)"
   & $python -m pip install "browser-use==$PinnedVersion"
 }
 

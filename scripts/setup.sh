@@ -20,17 +20,17 @@ EOF
 echo "  wrote hardening env to $RC (source it from your shell rc)"
 
 # --- 2. Pick a Python ---
-PYTHON="${NETCLAW_PYTHON:-}"
+PYTHON="${BROWSER_USE_PYTHON:-}"
 for c in "$PYTHON" python3 python; do
   if [ -n "$c" ] && command -v "$c" >/dev/null 2>&1; then PYTHON="$c"; break; fi
 done
-[ -n "$PYTHON" ] || { echo "No Python found. Set NETCLAW_PYTHON." >&2; exit 1; }
+[ -n "$PYTHON" ] || { echo "No Python found. Set BROWSER_USE_PYTHON." >&2; exit 1; }
 echo "  using python: $PYTHON"
 
 # --- 3. Install browser-use (offline wheelhouse first, else online) ---
-if [ -n "${NETCLAW_WHEELHOUSE:-}" ] && [ -d "${NETCLAW_WHEELHOUSE}" ]; then
-  echo "  installing browser-use==$PINNED_VERSION from wheelhouse $NETCLAW_WHEELHOUSE"
-  "$PYTHON" -m pip install --no-index --find-links "$NETCLAW_WHEELHOUSE" "browser-use==$PINNED_VERSION"
+if [ -n "${BROWSER_USE_WHEELHOUSE:-}" ] && [ -d "${BROWSER_USE_WHEELHOUSE}" ]; then
+  echo "  installing browser-use==$PINNED_VERSION from wheelhouse $BROWSER_USE_WHEELHOUSE"
+  "$PYTHON" -m pip install --no-index --find-links "$BROWSER_USE_WHEELHOUSE" "browser-use==$PINNED_VERSION"
 else
   echo "  online install of browser-use==$PINNED_VERSION"
   "$PYTHON" -m pip install "browser-use==$PINNED_VERSION"

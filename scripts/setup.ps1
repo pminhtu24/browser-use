@@ -52,8 +52,11 @@ if ($LASTEXITCODE -ne 0 -or $geckodriverVersion -notmatch "geckodriver $BundledG
   throw "Bundled geckodriver version check failed: $geckodriverVersion"
 }
 Write-Host "  browser: Chromium uses CDP; Firefox uses bundled $geckodriverVersion"
-if (-not $env:FIREFOX_BINARY -and -not (Get-Command firefox -ErrorAction SilentlyContinue)) {
-  Write-Warning 'Firefox not found; set FIREFOX_BINARY.'
+$firefoxStatus = & $python (Join-Path $PSScriptRoot 'firefox-use.py') --json doctor 2>$null | ConvertFrom-Json
+if ($firefoxStatus.firefox) {
+  Write-Host "  firefox: $($firefoxStatus.firefox)"
+} else {
+  Write-Warning 'Firefox not found after PATH, registry, and standard-path discovery. Set FIREFOX_BINARY only for a non-standard or portable install.'
 }
 
 # --- 5. Verify ---

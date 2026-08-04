@@ -115,14 +115,33 @@ def free_port() -> int:
 
 def find_firefox() -> str | None:
     if binary := os.environ.get("FIREFOX_BINARY"):
-        return binary if Path(binary).is_file() else None
+        if Path(binary).expanduser().is_file():
+            return str(Path(binary).expanduser())
+        if found := shutil.which(binary):
+            return found
     found = shutil.which("firefox") or shutil.which("firefox.exe")
     if found:
         return found
+    if os.name == "nt":
+        import winreg
+        key_name = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\firefox.exe"
+        for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            for view in (winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY):
+                try:
+                    with winreg.OpenKey(root, key_name, 0, winreg.KEY_READ | view) as key:
+                        path = str(winreg.QueryValue(key, None)).strip('"')
+                    if Path(path).is_file():
+                        return path
+                except OSError:
+                    pass
     candidates = [
         "/Applications/Firefox.app/Contents/MacOS/firefox",
         os.path.join(os.environ.get("PROGRAMFILES", ""), "Mozilla Firefox", "firefox.exe"),
         os.path.join(os.environ.get("PROGRAMFILES(X86)", ""), "Mozilla Firefox", "firefox.exe"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Mozilla Firefox", "firefox.exe"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Mozilla Firefox", "firefox.exe"),
+        r"C:\Program Files\Mozilla Firefox\firefox.exe",
+        r"C:\Program Files (x86)\Mozilla Firefox\firefox.exe",
     ]
     return next((path for path in candidates if path and Path(path).is_file()), None)
 
@@ -535,7 +554,7 @@ def start(session: str, profile: str | None = None) -> dict:
     if not geckodriver:
         raise RuntimeError("geckodriver not found. Install it or set GECKODRIVER.")
     if not firefox:
-        raise RuntimeError("Firefox not found. Install it or set FIREFOX_BINARY.")
+        raise RuntimeError("Firefox not found after PATH, registry, and standard-path discovery. Set FIREFOX_BINARY for a non-standard install.")
     if not headless_enabled() and not headed_ready():
         raise RuntimeError(
             "Firefox headed mode requires DISPLAY or WAYLAND_DISPLAY on Linux. "
@@ -587,9 +606,7 @@ def start(session: str, profile: str | None = None) -> dict:
             browser_args.append("-headless")
         if profile_path:
             browser_args.extend(("-profile", str(profile_path)))
-        options = {"args": browser_args}
-        if os.environ.get("FIREFOX_BINARY"):
-            options["binary"] = firefox
+        options = {"args": browser_args, "binary": firefox}
         value = request(port, "POST", "/session", {
             "capabilities": {"alwaysMatch": {"browserName": "firefox", "moz:firefoxOptions": options}}
         })
@@ -830,20 +847,24 @@ def selftest() -> dict:
         pass
     else:
         raise AssertionError("unsafe profile name accepted")
-    previous = {key: os.environ.get(key) for key in ("FIREFOX_STATE_HOME", "BROWSER_USE_HOME", "FIREFOX_PROFILE_HOME", "FIREFOX_PROFILES_INI")}
+    previous = {key: os.environ.get(key) for key in ("FIREFOX_BINARY", "FIREFOX_STATE_HOME", "BROWSER_USE_HOME", "FIREFOX_PROFILE_HOME", "FIREFOX_PROFILES_INI")}
     try:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            binary = root / "firefox"
+            binary.touch()
             source = root / "native"
             source.mkdir()
             (source / "marker.txt").write_text("native", encoding="utf-8")
             ini = root / "profiles.ini"
             ini.write_text("[Profile0]\nName=default-release\nIsRelative=0\nPath=" + str(source) + "\nDefault=1\n", encoding="utf-8")
             os.environ.update({
+                "FIREFOX_BINARY": str(binary),
                 "FIREFOX_STATE_HOME": str(root / "state"),
                 "FIREFOX_PROFILE_HOME": str(root / "profiles"),
                 "FIREFOX_PROFILES_INI": str(ini),
             })
+            assert find_firefox() == str(binary)
             assert home() == root / "state"
             created_profile = create_managed_profile("work", "default-release")
             assert Path(created_profile["path"], "marker.txt").read_text(encoding="utf-8") == "native"

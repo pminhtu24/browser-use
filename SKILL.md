@@ -143,6 +143,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\scripts\use-browser.p
 & "$env:BROWSER_USE_PYTHON" ".\scripts\firefox-use.py" state
 ```
 
+Before claiming Firefox is missing on Windows, run `doctor`. The helper automatically
+checks `FIREFOX_BINARY`, `PATH`, the Windows `App Paths` registry, `Program Files`, and
+standard per-user install paths. If discovery still fails, locate the binary, set
+`FIREFOX_BINARY` for the current process only, and rerun `doctor`; do not require a
+permanent environment variable for a standard installation.
+
 Require installed Firefox. On Windows x64, use the bundled geckodriver without a
 download, installation, `PATH` change, or administrator access. `GECKODRIVER` may
 override it; Linux and macOS continue to use `geckodriver` on `PATH`. Set
@@ -218,6 +224,7 @@ On Linux, headed mode requires `DISPLAY` or `WAYLAND_DISPLAY`.
 ### Firefox
 
 - Run `scripts/firefox-use.py doctor` to verify Firefox, geckodriver, profile storage, and display readiness.
+- On Windows, exhaust automatic and standard-path discovery before asking the user to locate Firefox; see `REFERENCE.md`.
 - On Windows x64, keep `vendor/geckodriver/windows-x64/geckodriver.exe` with the skill; never download a driver at runtime.
 - If a native profile is locked, close normal Firefox before cloning it.
 - If an element index is stale, run `state` again instead of retrying the old index.

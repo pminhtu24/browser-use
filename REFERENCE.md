@@ -125,6 +125,29 @@ bundled Windows x64 geckodriver, `GECKODRIVER`, or a driver on `PATH`, in that o
 and keeps the same deterministic, index-based workflow. The bundled driver requires
 no runtime download, installation, `PATH` change, or administrator access.
 
+### Windows Firefox discovery
+
+Run `doctor` before concluding Firefox is unavailable. It checks `FIREFOX_BINARY`,
+`PATH`, the Windows `App Paths` registry, `Program Files`, and standard per-user paths.
+For a non-standard or portable install, recover with a process-local override:
+
+```powershell
+& "$env:BROWSER_USE_PYTHON" ".\scripts\firefox-use.py" doctor
+$command = Get-Command firefox -ErrorAction SilentlyContinue
+$firefox = @(
+  $command.Source
+  'C:\Program Files\Mozilla Firefox\firefox.exe'
+  'C:\Program Files (x86)\Mozilla Firefox\firefox.exe'
+  "$env:LOCALAPPDATA\Mozilla Firefox\firefox.exe"
+  "$env:LOCALAPPDATA\Programs\Mozilla Firefox\firefox.exe"
+) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+if ($firefox) { $env:FIREFOX_BINARY = $firefox }
+& "$env:BROWSER_USE_PYTHON" ".\scripts\firefox-use.py" doctor
+```
+
+Do not persist `FIREFOX_BINARY` or ask the user to reinstall Firefox when a standard
+binary was found; keep the override scoped to the current agent process.
+
 Global options must precede the command:
 
 | Option | Description |

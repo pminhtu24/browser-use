@@ -190,8 +190,9 @@ covers origins visited by that Firefox session.
 `profile list` marks Firefox-owned profiles as `native` and persistent automation
 profiles as `managed`. Native names clone the closed source for one session and
 delete that temporary clone on close. Managed profiles live under
-`FIREFOX_PROFILE_HOME` (or `.firefox-profiles` in this package), survive `close`,
-and must be removed explicitly with `profile delete`.
+`FIREFOX_PROFILE_HOME`, the OS temporary directory on native Firefox/Windows, or the
+Firefox sandbox directory on Snap/Flatpak. They survive `close` and must be removed
+explicitly with `profile delete`.
 
 Native discovery supports both legacy `profiles.ini` names and modern Firefox
 Profile Groups names shown in the UI, such as `Work`.

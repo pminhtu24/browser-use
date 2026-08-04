@@ -25,7 +25,6 @@ from urllib.request import Request, urlopen
 ELEMENT_KEY = "element-6066-11e4-a52e-4f735466cecf"
 PROFILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 PROFILE_LOCKS = ("parent.lock", ".parentlock", "lock")
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
 KEYS = {
     "Null": "\ue000", "Backspace": "\ue003", "Tab": "\ue004", "Enter": "\ue007",
     "Shift": "\ue008", "Control": "\ue009", "Alt": "\ue00a", "Escape": "\ue00c",
@@ -35,8 +34,12 @@ KEYS = {
 
 
 def home() -> Path:
-    configured = os.environ.get("FIREFOX_STATE_HOME") or os.environ.get("BROWSER_USE_HOME")
-    root = Path(configured) / "firefox" if configured else PROJECT_ROOT / ".firefox-use-state"
+    if configured := os.environ.get("FIREFOX_STATE_HOME"):
+        root = Path(configured).expanduser()
+    elif configured := os.environ.get("BROWSER_USE_HOME"):
+        root = Path(configured).expanduser() / "firefox"
+    else:
+        root = Path(tempfile.gettempdir()) / "browser-use-firefox" / "state"
     root.mkdir(parents=True, exist_ok=True)
     return root
 
@@ -153,7 +156,14 @@ def profile_ini() -> Path | None:
 def profile_home() -> Path:
     if configured := os.environ.get("FIREFOX_PROFILE_HOME"):
         return secure_directory(Path(configured).expanduser())
-    return secure_directory(PROJECT_ROOT / ".firefox-profiles")
+    installation = firefox_installation()
+    if installation == "snap":
+        root = Path.home() / "snap" / "firefox" / "common" / ".browser-use-profiles"
+    elif installation == "flatpak":
+        root = Path.home() / ".var" / "app" / "org.mozilla.firefox" / ".browser-use-profiles"
+    else:
+        root = Path(tempfile.gettempdir()) / "browser-use-firefox" / "profiles"
+    return secure_directory(root)
 
 
 def validate_profile_name(name: str) -> str:
@@ -817,6 +827,7 @@ def selftest() -> dict:
                 "FIREFOX_PROFILE_HOME": str(root / "profiles"),
                 "FIREFOX_PROFILES_INI": str(ini),
             })
+            assert home() == root / "state"
             created_profile = create_managed_profile("work", "default-release")
             assert Path(created_profile["path"], "marker.txt").read_text(encoding="utf-8") == "native"
             assert resolve_profile(None) == "automation"

@@ -36,10 +36,9 @@ else
   "$PYTHON" -m pip install "browser-use==$PINNED_VERSION"
 fi
 
-# --- 4. Browser drivers: no downloads ---
-echo "  browser: Chromium uses CDP; Firefox uses installed geckodriver"
+# --- 4. Browsers: no driver downloads ---
+echo "  browser: Chromium uses CDP; Firefox uses built-in WebDriver BiDi"
 command -v firefox >/dev/null 2>&1 || [ -n "${FIREFOX_BINARY:-}" ] || echo "  warning: Firefox not found (set FIREFOX_BINARY)"
-command -v geckodriver >/dev/null 2>&1 || [ -n "${GECKODRIVER:-}" ] || echo "  warning: geckodriver not found (set GECKODRIVER)"
 
 # --- 5. Verify ---
 echo; echo "Verifying..."

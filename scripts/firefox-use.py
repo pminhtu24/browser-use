@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Deterministic Firefox automation through local geckodriver/WebDriver."""
+"""Deterministic Firefox automation through WebDriver BiDi."""
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import base64
 import configparser
 import json
 import os
 import re
+import secrets
 import shutil
 import signal
 import socket
@@ -22,7 +24,9 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-ELEMENT_KEY = "element-6066-11e4-a52e-4f735466cecf"
+import aiohttp
+from aiohttp import web
+
 PROFILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 PROFILE_LOCKS = ("parent.lock", ".parentlock", "lock")
 KEYS = {
@@ -74,37 +78,170 @@ def save_state(session: str, state: dict) -> None:
     tmp.replace(path)
 
 
-def request(port: int, method: str, path: str, payload: object | None = None, timeout: float = 10):
-    body = None if payload is None else json.dumps(payload).encode()
-    req = Request(
-        f"http://127.0.0.1:{port}{path}", data=body, method=method,
-        headers={"Content-Type": "application/json"},
+async def _request(websocket_url: str, method: str, params: dict, timeout: float):
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as client:
+            async with client.ws_connect(websocket_url, max_msg_size=0) as websocket:
+                await websocket.send_json({"id": 1, "method": method, "params": params})
+                while True:
+                    message = await asyncio.wait_for(websocket.receive(), timeout)
+                    if message.type == aiohttp.WSMsgType.TEXT:
+                        data = json.loads(message.data)
+                        if data.get("id") != 1:
+                            continue
+                        if data.get("type") == "error":
+                            detail = data.get("message") or data.get("error") or "WebDriver BiDi command failed"
+                            if data.get("error") == "stale element reference":
+                                detail = "Element is stale; run state again."
+                            raise RuntimeError(detail)
+                        return data.get("result")
+                    if message.type in {aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR}:
+                        raise RuntimeError("Firefox closed the WebDriver BiDi connection")
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as error:
+        raise RuntimeError(f"Firefox WebDriver BiDi is unavailable: {error}") from error
+
+
+def request(websocket_url: str, method: str, params: dict | None = None, timeout: float = 10):
+    return asyncio.run(_request(websocket_url, method, params or {}, timeout))
+
+
+def broker_request(state: dict, method: str, params: dict | None = None, timeout: float = 10):
+    body = json.dumps({"method": method, "params": params or {}}).encode()
+    request_value = Request(
+        f"http://127.0.0.1:{state['broker_port']}/command", data=body, method="POST",
+        headers={"Content-Type": "application/json", "X-Firefox-Token": state["broker_token"]},
     )
     try:
-        with urlopen(req, timeout=timeout) as response:
-            data = json.load(response)
+        with urlopen(request_value, timeout=timeout) as response:
+            value = json.load(response)
     except HTTPError as error:
         try:
-            data = json.load(error)
+            value = json.load(error)
+            detail = value.get("error")
         except Exception:
-            raise RuntimeError(f"WebDriver HTTP {error.code}") from error
+            detail = None
+        raise RuntimeError(detail or f"Firefox BiDi broker HTTP {error.code}") from error
     except (URLError, TimeoutError) as error:
-        raise RuntimeError(f"Firefox WebDriver is unavailable: {getattr(error, 'reason', error)}") from error
-    value = data.get("value")
-    if isinstance(value, dict) and value.get("error"):
-        message = value.get("message") or value["error"]
-        if value["error"] == "stale element reference":
-            message = "Element is stale; run state again."
-        raise RuntimeError(message)
-    return value
+        raise RuntimeError(f"Firefox BiDi broker is unavailable: {getattr(error, 'reason', error)}") from error
+    return value.get("result")
 
 
-def call(state: dict, method: str, suffix: str, payload: object | None = None):
-    return request(state["port"], method, f"/session/{state['session_id']}{suffix}", payload)
+def call(state: dict, method: str, params: dict | None = None, timeout: float = 10):
+    return broker_request(state, method, params, timeout)
 
 
-def execute(state: dict, script: str, args: list | None = None):
-    return call(state, "POST", "/execute/sync", {"script": script, "args": args or []})
+def local_value(value):
+    if isinstance(value, dict) and "sharedId" in value:
+        return {"sharedId": value["sharedId"]}
+    if value is None:
+        return {"type": "null"}
+    if isinstance(value, bool):
+        return {"type": "boolean", "value": value}
+    if isinstance(value, (int, float)):
+        return {"type": "number", "value": value}
+    if isinstance(value, str):
+        return {"type": "string", "value": value}
+    if isinstance(value, list):
+        return {"type": "array", "value": [local_value(item) for item in value]}
+    if isinstance(value, dict):
+        return {"type": "object", "value": [[str(key), local_value(item)] for key, item in value.items()]}
+    raise RuntimeError(f"Unsupported script argument: {type(value).__name__}")
+
+
+def remote_value(value):
+    if not isinstance(value, dict) or "type" not in value:
+        return value
+    kind = value["type"]
+    if kind in {"null", "undefined"}:
+        return None
+    if kind == "node":
+        return {"sharedId": value["sharedId"]}
+    if kind in {"array", "set"}:
+        return [remote_value(item) for item in value.get("value", [])]
+    if kind in {"object", "map"}:
+        return {
+            remote_value(key) if isinstance(key, dict) else key: remote_value(item)
+            for key, item in value.get("value", [])
+        }
+    return value.get("value")
+
+
+def execute(state: dict, script: str, args: list | None = None, context: str | None = None):
+    result = call(state, "script.callFunction", {
+        "functionDeclaration": f"function(){{{script}}}",
+        "awaitPromise": True,
+        "target": {"context": context or current_context(state)["context"]},
+        "arguments": [local_value(value) for value in (args or [])],
+        "resultOwnership": "none",
+        "serializationOptions": {"maxObjectDepth": 10, "maxDomDepth": 1, "includeShadowTree": "open"},
+    })
+    if result.get("type") == "exception":
+        details = result.get("exceptionDetails", {})
+        raise RuntimeError(details.get("text") or remote_value(details.get("exception")) or "JavaScript evaluation failed")
+    return remote_value(result["result"])
+
+
+async def run_broker(websocket_url: str, port: int, token: str) -> None:
+    client = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None))
+    runner = None
+    try:
+        websocket = await client.ws_connect(websocket_url, max_msg_size=0)
+        command_id = 0
+        lock = asyncio.Lock()
+        stopped = asyncio.Event()
+
+        async def send(method: str, params: dict, timeout: float = 30):
+            nonlocal command_id
+            async with lock:
+                command_id += 1
+                current_id = command_id
+                await websocket.send_json({"id": current_id, "method": method, "params": params})
+                while True:
+                    message = await asyncio.wait_for(websocket.receive(), timeout)
+                    if message.type == aiohttp.WSMsgType.TEXT:
+                        data = json.loads(message.data)
+                        if data.get("id") != current_id:
+                            continue
+                        if data.get("type") == "error":
+                            detail = data.get("message") or data.get("error") or "WebDriver BiDi command failed"
+                            if data.get("error") == "stale element reference":
+                                detail = "Element is stale; run state again."
+                            raise RuntimeError(detail)
+                        return data.get("result")
+                    if message.type in {aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR}:
+                        raise RuntimeError("Firefox closed the WebDriver BiDi connection")
+
+        session = await send("session.new", {"capabilities": {"alwaysMatch": {"browserName": "firefox"}}})
+
+        async def command(request_value: web.Request) -> web.Response:
+            if not secrets.compare_digest(request_value.headers.get("X-Firefox-Token", ""), token):
+                return web.json_response({"error": "Forbidden"}, status=403)
+            try:
+                payload = await request_value.json()
+                method = payload["method"]
+                if method == "__status__":
+                    result = {"sessionId": session["sessionId"]}
+                elif method == "__stop__":
+                    try:
+                        result = await send("browser.close", {})
+                    finally:
+                        asyncio.get_running_loop().call_later(0.1, stopped.set)
+                else:
+                    result = await send(method, payload.get("params") or {})
+                return web.json_response({"result": result})
+            except Exception as error:
+                return web.json_response({"error": str(error)}, status=500)
+
+        application = web.Application()
+        application.router.add_post("/command", command)
+        runner = web.AppRunner(application, access_log=None)
+        await runner.setup()
+        await web.TCPSite(runner, "127.0.0.1", port).start()
+        await stopped.wait()
+    finally:
+        if runner:
+            await runner.cleanup()
+        await client.close()
 
 
 def free_port() -> int:
@@ -146,16 +283,6 @@ def find_firefox() -> str | None:
     return next((path for path in candidates if path and Path(path).is_file()), None)
 
 
-def find_geckodriver() -> str | None:
-    if configured := os.environ.get("GECKODRIVER"):
-        return configured if Path(configured).is_file() else shutil.which(configured)
-    if os.name == "nt":
-        bundled = Path(__file__).resolve().parent.parent / "vendor" / "geckodriver" / "windows-x64" / "geckodriver.exe"
-        if bundled.is_file():
-            return str(bundled)
-    return shutil.which("geckodriver")
-
-
 def profile_ini() -> Path | None:
     if configured := os.environ.get("FIREFOX_PROFILES_INI"):
         path = Path(configured)
@@ -163,9 +290,7 @@ def profile_ini() -> Path | None:
     native = Path.home() / ".mozilla" / "firefox" / "profiles.ini"
     snap = Path.home() / "snap" / "firefox" / "common" / ".mozilla" / "firefox" / "profiles.ini"
     flatpak = Path.home() / ".var" / "app" / "org.mozilla.firefox" / ".mozilla" / "firefox" / "profiles.ini"
-    driver = str(find_geckodriver() or "").replace("\\", "/")
-    platform_profiles = [snap, native, flatpak] if "/snap/" in driver else [native, snap, flatpak]
-    candidates = platform_profiles + [
+    candidates = [native, snap, flatpak] + [
         Path.home() / "Library" / "Application Support" / "Firefox" / "profiles.ini",
         Path(os.environ.get("APPDATA", "")) / "Mozilla" / "Firefox" / "profiles.ini",
     ]
@@ -390,11 +515,10 @@ def headed_ready() -> bool:
 
 
 def firefox_installation() -> str:
-    driver = str(find_geckodriver() or "").replace("\\", "/")
     binary = str(find_firefox() or "").replace("\\", "/")
-    if "/snap/" in driver or "/snap/" in binary:
+    if "/snap/" in binary:
         return "snap"
-    if "/flatpak/" in driver or "/.var/app/org.mozilla.firefox/" in binary:
+    if "/flatpak/" in binary or "/.var/app/org.mozilla.firefox/" in binary:
         return "flatpak"
     value = str(profile_ini() or "").replace("\\", "/")
     if "/snap/firefox/common/" in value:
@@ -406,7 +530,9 @@ def firefox_installation() -> str:
 
 def driver_alive(state: dict) -> bool:
     try:
-        request(int(state["port"]), "GET", "/status", timeout=1)
+        if not process_alive(state["pid"]) or not process_alive(state["broker_pid"]):
+            return False
+        call(state, "session.status", timeout=1)
         return True
     except (KeyError, RuntimeError, ValueError):
         return False
@@ -518,7 +644,7 @@ def stop(session: str, state: dict) -> None:
         return
     if driver_alive(state):
         try:
-            call(state, "DELETE", "")
+            broker_request(state, "__stop__")
         except RuntimeError:
             pass
     if state.get("profile_kind") == "managed":
@@ -527,9 +653,14 @@ def stop(session: str, state: dict) -> None:
         unlocked = wait_for_profile_unlock(profile)
         if not unlocked and firefox_lock_stale(profile):
             clear_managed_firefox_locks(name)
-    if driver_alive(state):
+    if process_alive(state.get("pid")):
         try:
             os.kill(int(state["pid"]), signal.SIGTERM)
+        except (KeyError, OSError, ValueError):
+            pass
+    if process_alive(state.get("broker_pid")):
+        try:
+            os.kill(int(state["broker_pid"]), signal.SIGTERM)
         except (KeyError, OSError, ValueError):
             pass
     if state.get("profile_kind") == "managed":
@@ -549,10 +680,7 @@ def start(session: str, profile: str | None = None) -> dict:
         stop(session, current)
     profile = resolve_profile(profile)
 
-    geckodriver = find_geckodriver()
     firefox = find_firefox()
-    if not geckodriver:
-        raise RuntimeError("geckodriver not found. Install it or set GECKODRIVER.")
     if not firefox:
         raise RuntimeError("Firefox not found after PATH, registry, and standard-path discovery. Set FIREFOX_BINARY for a non-standard install.")
     if not headless_enabled() and not headed_ready():
@@ -574,16 +702,25 @@ def start(session: str, profile: str | None = None) -> dict:
             profile_kind = "native"
             clone = clone_profile(profile, session)
             profile_path = clone
-    port = free_port()
+    port, broker_port = free_port(), free_port()
+    while broker_port == port:
+        broker_port = free_port()
+    broker_token = secrets.token_urlsafe(32)
     creationflags = 0
     popen_args = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
     if os.name == "nt":
         creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
     else:
         popen_args["start_new_session"] = True
+    broker = None
     try:
+        browser_args = [firefox, "--no-remote", "--remote-debugging-port", str(port)]
+        if headless_enabled():
+            browser_args.append("-headless")
+        if profile_path:
+            browser_args.extend(("-profile", str(profile_path)))
         process = subprocess.Popen(
-            [geckodriver, "--host", "127.0.0.1", "--port", str(port)],
+            browser_args,
             creationflags=creationflags, **popen_args,
         )
     except Exception:
@@ -592,26 +729,41 @@ def start(session: str, profile: str | None = None) -> dict:
             release_managed_profile(profile, session)
         raise
     try:
-        for _ in range(50):
-            if driver_alive({"port": port}):
+        websocket_url = f"ws://127.0.0.1:{port}/session"
+        last_error = None
+        for _ in range(100):
+            try:
+                request(websocket_url, "session.status", timeout=0.5)
                 break
+            except RuntimeError as error:
+                last_error = error
             if process.poll() is not None:
-                raise RuntimeError("geckodriver exited before becoming ready")
+                raise RuntimeError("Firefox exited before WebDriver BiDi became ready")
             time.sleep(0.1)
         else:
-            raise RuntimeError("geckodriver did not become ready")
+            raise RuntimeError(f"Firefox WebDriver BiDi did not become ready: {last_error}")
 
-        browser_args = []
-        if headless_enabled():
-            browser_args.append("-headless")
-        if profile_path:
-            browser_args.extend(("-profile", str(profile_path)))
-        options = {"args": browser_args, "binary": firefox}
-        value = request(port, "POST", "/session", {
-            "capabilities": {"alwaysMatch": {"browserName": "firefox", "moz:firefoxOptions": options}}
-        })
+        broker = subprocess.Popen([
+            sys.executable, str(Path(__file__).resolve()), "_broker",
+            "--websocket-url", websocket_url, "--port", str(broker_port), "--token", broker_token,
+        ], creationflags=creationflags, **popen_args)
+        broker_state = {"broker_port": broker_port, "broker_token": broker_token}
+        for _ in range(100):
+            try:
+                value = broker_request(broker_state, "__status__", timeout=0.5)
+                break
+            except RuntimeError as error:
+                last_error = error
+            if broker.poll() is not None:
+                raise RuntimeError("Firefox BiDi broker exited before becoming ready")
+            time.sleep(0.1)
+        else:
+            raise RuntimeError(f"Firefox BiDi broker did not become ready: {last_error}")
+
+        session_id = value["sessionId"]
         state = {
-            "pid": process.pid, "port": port, "session_id": value["sessionId"],
+            "pid": process.pid, "port": port, "session_id": session_id,
+            "broker_pid": broker.pid, "broker_port": broker_port, "broker_token": broker_token,
             "elements": [], "origins": [], "profile": profile,
             "profile_kind": profile_kind, "profile_path": str(profile_path) if profile_path else None,
             "profile_clone": str(clone) if clone else None,
@@ -621,8 +773,18 @@ def start(session: str, profile: str | None = None) -> dict:
         save_state(session, state)
         return state
     except Exception:
+        if broker:
+            try:
+                broker.terminate()
+                broker.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
         try:
             process.terminate()
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
         except OSError:
             pass
         remove_profile_clone(str(clone) if clone else None)
@@ -634,7 +796,7 @@ def start(session: str, profile: str | None = None) -> dict:
 def active(session: str, profile: str | None = None) -> dict:
     state = start(session, profile)
     try:
-        call(state, "GET", "/url")
+        call(state, "browsingContext.getTree")
         return state
     except RuntimeError:
         stop(session, state)
@@ -648,15 +810,22 @@ def origin(url: str) -> str | None:
 
 def remember_origin(session: str, state: dict, url: str) -> None:
     if value := origin(url):
-        if value not in state["origins"]:
+        if value not in state.setdefault("origins", []):
             state["origins"].append(value)
             save_state(session, state)
 
 
-def switch_frame(state: dict, frame: list[str]) -> None:
-    call(state, "POST", "/frame", {"id": None})
-    for frame_id in frame:
-        call(state, "POST", "/frame", {"id": {ELEMENT_KEY: frame_id}})
+def top_contexts(state: dict) -> list[dict]:
+    return call(state, "browsingContext.getTree").get("contexts", [])
+
+
+def current_context(state: dict) -> dict:
+    contexts = top_contexts(state)
+    if not contexts:
+        raise RuntimeError("Firefox has no open browsing context")
+    selected = next((item for item in contexts if item["context"] == state.get("active_context")), contexts[0])
+    state["active_context"] = selected["context"]
+    return selected
 
 
 def element(state: dict, index: int) -> dict:
@@ -664,108 +833,148 @@ def element(state: dict, index: int) -> dict:
         item = state["elements"][index]
     except (IndexError, KeyError):
         raise RuntimeError("Invalid element index; run state again.") from None
-    switch_frame(state, item["frame"])
-    return {ELEMENT_KEY: item["id"]}
+    return {"sharedId": item["id"], "context": item["context"]}
 
 
-def enumerate_context(state: dict, frame: list[str], output: list[dict], depth: int = 0) -> None:
+def enumerate_context(state: dict, context: dict, frame: list[str], output: list[dict], depth: int = 0) -> None:
     items = execute(state, """
 const found=[];
 const visible=e=>{const r=e.getBoundingClientRect(),s=getComputedStyle(e);return r.width>0&&r.height>0&&s.visibility!=='hidden'&&s.display!=='none'};
 const walk=root=>{for(const e of root.querySelectorAll('a,button,input,textarea,select,[role="button"],[role="link"],[contenteditable="true"],[tabindex]:not([tabindex="-1"])'))if(visible(e))found.push({element:e,tag:e.tagName.toLowerCase(),type:e.type||'',text:(e.innerText||e.value||e.getAttribute('aria-label')||e.placeholder||'').trim().replace(/\s+/g,' ').slice(0,160)});for(const e of root.querySelectorAll('*'))if(e.shadowRoot)walk(e.shadowRoot)};
 walk(document);return found.slice(0,200);
-""")
+""", context=context["context"])
     for item in items:
-        output.append({"id": item["element"][ELEMENT_KEY], "frame": frame, **{k: item[k] for k in ("tag", "type", "text")}})
+        output.append({
+            "id": item["element"]["sharedId"], "context": context["context"], "frame": frame,
+            **{key: item[key] for key in ("tag", "type", "text")},
+        })
     if depth >= 8:
         return
-    frames = call(state, "POST", "/elements", {"using": "css selector", "value": "iframe,frame"})
-    for child in frames:
-        frame_id = child[ELEMENT_KEY]
-        entered = False
+    for child in context.get("children") or []:
         try:
-            call(state, "POST", "/frame", {"id": child})
-            entered = True
-            enumerate_context(state, frame + [frame_id], output, depth + 1)
+            enumerate_context(state, child, frame + [child["context"]], output, depth + 1)
         except RuntimeError:
             pass
-        finally:
-            if entered:
-                call(state, "POST", "/frame/parent", {})
 
 
 def state_result(session: str, state: dict) -> dict:
-    call(state, "POST", "/frame", {"id": None})
+    context = current_context(state)
     items: list[dict] = []
-    enumerate_context(state, [], items)
-    call(state, "POST", "/frame", {"id": None})
-    state["elements"] = [{"id": item["id"], "frame": item["frame"]} for item in items]
+    enumerate_context(state, context, [], items)
+    state["elements"] = [{"id": item["id"], "context": item["context"], "frame": item["frame"]} for item in items]
     save_state(session, state)
-    url = call(state, "GET", "/url")
+    url = context["url"]
     remember_origin(session, state, url)
-    return {"url": url, "title": call(state, "GET", "/title"), "elements": [
+    return {"url": url, "title": execute(state, "return document.title", context=context["context"]), "elements": [
         {"index": i, "tag": item["tag"], "type": item["type"], "text": item["text"], "frame": item["frame"]}
         for i, item in enumerate(items)
     ]}
 
 
 def send_keys(state: dict, target: dict, text: str) -> None:
+    execute(state, "arguments[0].focus();return null", [{"sharedId": target["sharedId"]}], target["context"])
     parts = text.split("+")
-    value = ("".join(KEYS.get(part, part) for part in parts) + KEYS["Null"]) if len(parts) > 1 else KEYS.get(text, text)
-    call(state, "POST", f"/element/{target[ELEMENT_KEY]}/value", {"text": value, "value": list(value)})
+    values = [KEYS.get(part, part) for part in parts] if len(parts) > 1 else list(KEYS.get(text, text))
+    if len(parts) > 1:
+        actions = [{"type": "keyDown", "value": value} for value in values]
+        actions.extend({"type": "keyUp", "value": value} for value in reversed(values))
+    else:
+        actions = [action for value in values for action in (
+            {"type": "keyDown", "value": value}, {"type": "keyUp", "value": value},
+        )]
+    call(state, "input.performActions", {
+        "context": target["context"],
+        "actions": [{"type": "key", "id": "keyboard", "actions": actions}],
+    })
 
 
 def pointer_action(state: dict, target: dict, button: int, count: int = 1) -> None:
-    actions = [{"type": "pointerMove", "duration": 0, "origin": target, "x": 0, "y": 0}]
+    execute(state, "arguments[0].scrollIntoView({block:'center',inline:'center'});return null", [{"sharedId": target["sharedId"]}], target["context"])
+    actions = [{
+        "type": "pointerMove", "duration": 0,
+        "origin": {"type": "element", "element": {"sharedId": target["sharedId"]}}, "x": 0, "y": 0,
+    }]
     for _ in range(count):
         actions += [{"type": "pointerDown", "button": button}, {"type": "pointerUp", "button": button}]
-    call(state, "POST", "/actions", {"actions": [{
+    call(state, "input.performActions", {"context": target["context"], "actions": [{
         "type": "pointer", "id": "mouse", "parameters": {"pointerType": "mouse"}, "actions": actions,
     }]})
 
 
-def with_url(state: dict, url: str | None, action):
-    if not url:
-        return action()
-    previous = call(state, "GET", "/url")
-    call(state, "POST", "/url", {"url": url})
-    try:
-        return action()
-    finally:
-        call(state, "POST", "/url", {"url": previous})
+def cookie_value(value: dict) -> str:
+    if value.get("type") == "base64":
+        return base64.b64decode(value.get("value", "")).decode("utf-8", errors="replace")
+    return value.get("value", "")
+
+
+def cookie_result(cookie: dict) -> dict:
+    output = {key: cookie[key] for key in ("name", "domain", "path", "secure", "httpOnly") if key in cookie}
+    output["value"] = cookie_value(cookie["value"])
+    if "expiry" in cookie:
+        output["expiry"] = cookie["expiry"]
+    if cookie.get("sameSite") != "default":
+        output["sameSite"] = cookie["sameSite"].title()
+    return output
+
+
+def cookie_partition(state: dict) -> dict:
+    return {"type": "context", "context": current_context(state)["context"]}
+
+
+def cookie_path_matches(request_path: str, cookie_path: str) -> bool:
+    return request_path == cookie_path or (
+        request_path.startswith(cookie_path) and (cookie_path.endswith("/") or request_path[len(cookie_path):].startswith("/"))
+    )
+
+
+def cookies_for_url(state: dict, url: str | None = None) -> list[dict]:
+    url = url or current_context(state)["url"]
+    parsed = urlparse(url)
+    host, path = (parsed.hostname or "").casefold(), parsed.path or "/"
+    cookies = call(state, "storage.getCookies", {"partition": cookie_partition(state)})["cookies"]
+    return [cookie_result(cookie) for cookie in cookies if (
+        host and (host == cookie["domain"].lstrip(".").casefold() or host.endswith("." + cookie["domain"].lstrip(".").casefold()))
+        and cookie_path_matches(path, cookie["path"])
+        and (not cookie["secure"] or parsed.scheme == "https")
+    )]
+
+
+def set_cookie(state: dict, cookie: dict) -> None:
+    clean = {key: cookie[key] for key in ("name", "domain", "path", "secure", "httpOnly", "expiry") if key in cookie}
+    clean["value"] = {"type": "string", "value": str(cookie.get("value", ""))}
+    if same_site := cookie.get("sameSite"):
+        if same_site.casefold() != "default":
+            clean["sameSite"] = same_site.casefold()
+    call(state, "storage.setCookie", {"cookie": clean, "partition": cookie_partition(state)})
+
+
+def clear_cookies_for_url(state: dict, url: str) -> None:
+    for cookie in cookies_for_url(state, url):
+        call(state, "storage.deleteCookies", {
+            "filter": {key: cookie[key] for key in ("name", "domain", "path")},
+            "partition": cookie_partition(state),
+        })
 
 
 def all_session_cookies(state: dict) -> list[dict]:
-    previous = call(state, "GET", "/url")
-    origins = state.get("origins") or ([origin(previous)] if origin(previous) else [])
+    current_url = current_context(state)["url"]
+    origins = state.get("origins") or ([origin(current_url)] if origin(current_url) else [])
     cookies: dict[tuple, dict] = {}
-    try:
-        for value in origins:
-            call(state, "POST", "/url", {"url": value})
-            for cookie in call(state, "GET", "/cookie"):
-                exported = dict(cookie)
-                exported["_origin"] = value
-                cookies[(cookie.get("name"), cookie.get("domain"), cookie.get("path"))] = exported
-    finally:
-        call(state, "POST", "/url", {"url": previous})
+    for value in origins:
+        for cookie in cookies_for_url(state, value):
+            exported = dict(cookie)
+            exported["_origin"] = value
+            cookies[(cookie.get("name"), cookie.get("domain"), cookie.get("path"))] = exported
     return list(cookies.values())
 
 
 def import_cookies(state: dict, cookies: list[dict]) -> int:
-    previous = call(state, "GET", "/url")
     count = 0
-    try:
-        for cookie in cookies:
-            domain = str(cookie.get("domain", "")).lstrip(".")
-            if not domain:
-                continue
-            target = cookie.get("_origin") or f"{'https' if cookie.get('secure') else 'http'}://{domain}"
-            call(state, "POST", "/url", {"url": target})
-            clean = {k: v for k, v in cookie.items() if k in {"name", "value", "path", "domain", "secure", "httpOnly", "expiry", "sameSite"}}
-            call(state, "POST", "/cookie", {"cookie": clean})
-            count += 1
-    finally:
-        call(state, "POST", "/url", {"url": previous})
+    for cookie in cookies:
+        if not str(cookie.get("domain", "")).lstrip("."):
+            continue
+        set_cookie(state, cookie)
+        count += 1
     return count
 
 
@@ -831,6 +1040,13 @@ def selftest() -> dict:
     assert safe_session("a/b") == "a_b"
     assert origin("https://example.com/a") == "https://example.com"
     assert KEYS["Enter"] == "\ue007"
+    assert local_value({"sharedId": "node-1"}) == {"sharedId": "node-1"}
+    assert remote_value({"type": "object", "value": [["ok", {"type": "boolean", "value": True}]]}) == {"ok": True}
+    assert cookie_result({
+        "name": "a", "value": {"type": "string", "value": "b"}, "domain": "example.com",
+        "path": "/", "secure": False, "httpOnly": True, "sameSite": "lax",
+    })["sameSite"] == "Lax"
+    assert cookie_path_matches("/docs/page", "/docs") and not cookie_path_matches("/docs-old", "/docs")
     parser = build_parser()
     assert parser.parse_args(["--session", "x", "open", "about:blank"]).session == "x"
     created = parser.parse_args(["profile", "create", "work", "--from", "default-release"])
@@ -906,6 +1122,13 @@ def selftest() -> dict:
 
 
 def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == "_broker":
+        parser = argparse.ArgumentParser(add_help=False)
+        parser.add_argument("--websocket-url", required=True)
+        parser.add_argument("--port", type=int, required=True)
+        parser.add_argument("--token", required=True)
+        args = parser.parse_args(sys.argv[2:])
+        asyncio.run(run_broker(args.websocket_url, args.port, args.token)); return
     args = build_parser().parse_args()
     if args.command == "selftest":
         emit(selftest(), args.json, "ok"); return
@@ -920,21 +1143,21 @@ def main() -> None:
             emit(result, args.json, f"Deleted managed Firefox profile: {args.name}")
         return
     if args.command == "doctor":
-        firefox, gecko = find_firefox(), find_geckodriver()
+        firefox = find_firefox()
         gui_ready = headed_ready()
         result = {
-            "ok": bool(firefox and gecko and (headless_enabled() or gui_ready)),
+            "ok": bool(firefox and (headless_enabled() or gui_ready)),
             "firefox": firefox, "firefoxVersion": version(firefox),
-            "geckodriver": gecko, "geckodriverVersion": version(gecko),
+            "protocol": "WebDriver BiDi", "transport": "WebSocket",
             "installation": firefox_installation(), "profileHome": str(profile_home()),
             "nativeProfiles": len(firefox_profiles()), "managedProfiles": len(managed_profiles()),
             "headless": headless_enabled(), "headedReady": gui_ready,
         }
         emit(result, args.json)
-        if not firefox or not gecko:
+        if not firefox:
             if args.json:
                 raise SystemExit(1)
-            raise RuntimeError("Firefox and geckodriver are required.")
+            raise RuntimeError("Firefox is required.")
         if not headless_enabled() and not gui_ready:
             if args.json:
                 raise SystemExit(1)
@@ -958,49 +1181,51 @@ def main() -> None:
     if args.command == "start":
         emit({"browser": "firefox", "session": args.session}, args.json, "firefox"); return
     if args.command == "open":
-        call(state, "POST", "/url", {"url": args.url}); url = call(state, "GET", "/url"); remember_origin(args.session, state, url); emit({"url": url}, args.json, url)
+        context = current_context(state)
+        result = call(state, "browsingContext.navigate", {"context": context["context"], "url": args.url, "wait": "complete"})
+        remember_origin(args.session, state, result["url"]); emit({"url": result["url"]}, args.json, result["url"])
     elif args.command == "state":
         result = state_result(args.session, state)
         lines = [f"URL: {result['url']}", f"Title: {result['title']}"] + [f"[{e['index']}] <{e['tag']}{' type='+e['type'] if e['type'] else ''}> {e['text']}" for e in result["elements"]]
         emit(result, args.json, "\n".join(lines))
     elif args.command == "back":
-        call(state, "POST", "/back", {}); emit({"url": call(state, "GET", "/url")}, args.json)
+        context = current_context(state); call(state, "browsingContext.traverseHistory", {"context": context["context"], "delta": -1}); emit({"url": current_context(state)["url"]}, args.json)
     elif args.command == "scroll":
         amount = args.amount if args.direction == "down" else -args.amount; execute(state, "window.scrollBy(0,arguments[0])", [amount]); emit({"scrolled": amount}, args.json)
     elif args.command == "click":
-        target = element(state, args.index); call(state, "POST", f"/element/{target[ELEMENT_KEY]}/click", {}); emit({"clicked": args.index}, args.json)
+        pointer_action(state, element(state, args.index), 0); emit({"clicked": args.index}, args.json)
     elif args.command == "input":
-        target = element(state, args.index); call(state, "POST", f"/element/{target[ELEMENT_KEY]}/clear", {}); send_keys(state, target, args.value); emit({"input": args.index}, args.json)
+        target = element(state, args.index); send_keys(state, target, ("Meta" if sys.platform == "darwin" else "Control") + "+a"); send_keys(state, target, "Backspace"); send_keys(state, target, args.value); emit({"input": args.index}, args.json)
     elif args.command in {"type", "keys"}:
-        send_keys(state, call(state, "GET", "/element/active"), args.text); emit({args.command: args.text}, args.json)
+        context = current_context(state); target = execute(state, "return document.activeElement", context=context["context"]); target["context"] = context["context"]; send_keys(state, target, args.text); emit({args.command: args.text}, args.json)
     elif args.command == "select":
-        selected = execute(state, "const e=arguments[0],q=arguments[1],o=[...e.options].find(x=>x.value===q||x.text===q);if(!o)throw Error('option not found');e.value=o.value;e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));return o.text", [element(state, args.index), args.value]); emit({"selected": selected}, args.json, selected)
+        target = element(state, args.index); selected = execute(state, "const e=arguments[0],q=arguments[1],o=[...e.options].find(x=>x.value===q||x.text===q);if(!o)throw Error('option not found');e.value=o.value;e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));return o.text", [{"sharedId": target["sharedId"]}, args.value], target["context"]); emit({"selected": selected}, args.json, selected)
     elif args.command == "upload":
         path = Path(args.value).resolve()
         if not path.is_file(): raise RuntimeError(f"Upload file not found: {path}")
-        send_keys(state, element(state, args.index), str(path)); emit({"uploaded": str(path)}, args.json)
+        target = element(state, args.index); call(state, "input.setFiles", {"context": target["context"], "element": {"sharedId": target["sharedId"]}, "files": [str(path)]}); emit({"uploaded": str(path)}, args.json)
     elif args.command in {"hover", "dblclick", "rightclick"}:
-        pointer_action(state, element(state, args.index), 2 if args.command == "rightclick" else 0, 2 if args.command == "dblclick" else 0); emit({args.command: args.index}, args.json)
+        count = 0 if args.command == "hover" else (2 if args.command == "dblclick" else 1); pointer_action(state, element(state, args.index), 2 if args.command == "rightclick" else 0, count); emit({args.command: args.index}, args.json)
     elif args.command == "switch":
-        handles = call(state, "GET", "/window/handles"); call(state, "POST", "/window", {"handle": handles[args.index]}); emit({"tab": args.index, "url": call(state, "GET", "/url")}, args.json)
+        contexts = top_contexts(state); selected = contexts[args.index]; call(state, "browsingContext.activate", {"context": selected["context"]}); state["active_context"] = selected["context"]; state["elements"] = []; save_state(args.session, state); emit({"tab": args.index, "url": selected["url"]}, args.json)
     elif args.command == "close-tab":
-        handles = call(state, "GET", "/window/handles")
-        if args.index is not None: call(state, "POST", "/window", {"handle": handles[args.index]})
-        remaining = call(state, "DELETE", "/window")
-        if remaining: call(state, "POST", "/window", {"handle": remaining[0]})
+        contexts = top_contexts(state); selected = contexts[args.index] if args.index is not None else current_context(state); call(state, "browsingContext.close", {"context": selected["context"]}); remaining = [] if len(contexts) == 1 else top_contexts(state)
+        if remaining: call(state, "browsingContext.activate", {"context": remaining[0]["context"]}); state["active_context"] = remaining[0]["context"]; state["elements"] = []; save_state(args.session, state)
         emit({"remainingTabs": len(remaining)}, args.json)
     elif args.command == "eval":
         emit(execute(state, "return eval(arguments[0])", [args.code]), args.json)
     elif args.command == "screenshot":
-        path = Path(args.path); path.write_bytes(base64.b64decode(call(state, "GET", "/screenshot"))); emit({"path": str(path)}, args.json, str(path))
+        path = Path(args.path); data = call(state, "browsingContext.captureScreenshot", {"context": current_context(state)["context"], "origin": "viewport"})["data"]; path.write_bytes(base64.b64decode(data)); emit({"path": str(path)}, args.json, str(path))
     elif args.command == "get":
-        if args.kind in {"title", "url"}: result = call(state, "GET", f"/{args.kind}")
+        context = current_context(state)
+        if args.kind == "url": result = context["url"]
+        elif args.kind == "title": result = execute(state, "return document.title", context=context["context"])
         elif args.kind == "html": result = execute(state, "const e=arguments[0]?document.querySelector(arguments[0]):document.documentElement;return e?e.outerHTML:null", [args.selector])
         else:
             if args.index is None: raise RuntimeError(f"get {args.kind} requires an index")
             target = element(state, args.index)
-            if args.kind == "text": result = call(state, "GET", f"/element/{target[ELEMENT_KEY]}/text")
-            else: result = execute(state, {"value":"return arguments[0].value", "attributes":"return Object.fromEntries([...arguments[0].attributes].map(a=>[a.name,a.value]))", "bbox":"const r=arguments[0].getBoundingClientRect();return{x:r.x,y:r.y,width:r.width,height:r.height}"}[args.kind], [target])
+            scripts = {"text":"return arguments[0].innerText||arguments[0].textContent||''", "value":"return arguments[0].value", "attributes":"return Object.fromEntries([...arguments[0].attributes].map(a=>[a.name,a.value]))", "bbox":"const r=arguments[0].getBoundingClientRect();return{x:r.x,y:r.y,width:r.width,height:r.height}"}
+            result = execute(state, scripts[args.kind], [{"sharedId": target["sharedId"]}], target["context"])
         emit(result, args.json)
     elif args.command == "wait":
         deadline = time.monotonic() + args.timeout / 1000
@@ -1012,19 +1237,17 @@ def main() -> None:
         else: raise RuntimeError(f"Timed out waiting for {args.kind}: {args.target}")
         emit({"found": args.target}, args.json)
     elif args.command == "cookies":
-        if args.cookie_command == "get": result = with_url(state, args.url, lambda: call(state, "GET", "/cookie")); emit(result, args.json)
+        if args.cookie_command == "get": result = cookies_for_url(state, args.url); emit(result, args.json)
         elif args.cookie_command == "set":
-            cookie = {"name": args.name, "value": args.value, "path": args.path, "secure": args.secure, "httpOnly": args.http_only}
-            for key, value in (("domain", args.domain), ("sameSite", args.same_site), ("expiry", args.expires)):
+            domain = args.domain or urlparse(current_context(state)["url"]).hostname
+            if not domain: raise RuntimeError("Cookie domain is required outside an http(s) page.")
+            cookie = {"name": args.name, "value": args.value, "domain": domain, "path": args.path, "secure": args.secure, "httpOnly": args.http_only}
+            for key, value in (("sameSite", args.same_site), ("expiry", args.expires)):
                 if value is not None: cookie[key] = value
-            call(state, "POST", "/cookie", {"cookie": cookie}); emit({"set": args.name}, args.json)
+            set_cookie(state, cookie); emit({"set": args.name}, args.json)
         elif args.cookie_command == "clear":
-            if args.url: with_url(state, args.url, lambda: call(state, "DELETE", "/cookie")); cleared = [args.url]
-            else:
-                previous = call(state, "GET", "/url"); cleared = state.get("origins", []) or [previous]
-                try:
-                    for value in cleared: call(state, "POST", "/url", {"url": value}); call(state, "DELETE", "/cookie")
-                finally: call(state, "POST", "/url", {"url": previous})
+            current_url = current_context(state)["url"]; cleared = [args.url] if args.url else (state.get("origins", []) or [current_url])
+            for value in cleared: clear_cookies_for_url(state, value)
             emit({"cleared": cleared}, args.json)
         elif args.cookie_command == "export":
             cookies = all_session_cookies(state); Path(args.path).write_text(json.dumps(cookies, indent=2), encoding="utf-8"); emit({"path": args.path, "count": len(cookies)}, args.json)

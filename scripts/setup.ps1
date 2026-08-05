@@ -1,11 +1,9 @@
 # browser-use skill — Windows setup (company / air-gapped friendly)
 # Installs browser-use==<pinned> and applies the enterprise hardening env vars.
-# Prefers an offline wheelhouse and verifies the bundled Windows x64 geckodriver.
+# Prefers an offline wheelhouse; Firefox uses its built-in WebDriver BiDi endpoint.
 
 $ErrorActionPreference = 'Stop'
 $PinnedVersion = '0.12.6'
-$BundledGeckodriverVersion = '0.37.1'
-$BundledGeckodriverSha256 = 'e95b4eac7960ffcd5acbfd92bb7d49d48f99c1d01a20ddd297fef8c80821020d'
 
 # --- 1. Hardening: disable telemetry / cloud / version-check (process + user) ---
 $hardening = @{
@@ -38,20 +36,8 @@ if ($env:BROWSER_USE_WHEELHOUSE -and (Test-Path $env:BROWSER_USE_WHEELHOUSE)) {
   & $python -m pip install "browser-use==$PinnedVersion"
 }
 
-# --- 4. Browser drivers: no downloads ---
-$bundledGeckodriver = Join-Path (Split-Path $PSScriptRoot -Parent) 'vendor\geckodriver\windows-x64\geckodriver.exe'
-if (-not (Test-Path -LiteralPath $bundledGeckodriver)) {
-  throw "Bundled geckodriver not found: $bundledGeckodriver"
-}
-$actualGeckodriverSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $bundledGeckodriver).Hash.ToLowerInvariant()
-if ($actualGeckodriverSha256 -ne $BundledGeckodriverSha256) {
-  throw "Bundled geckodriver checksum mismatch: $actualGeckodriverSha256"
-}
-$geckodriverVersion = & $bundledGeckodriver --version 2>&1 | Select-Object -First 1
-if ($LASTEXITCODE -ne 0 -or $geckodriverVersion -notmatch "geckodriver $BundledGeckodriverVersion") {
-  throw "Bundled geckodriver version check failed: $geckodriverVersion"
-}
-Write-Host "  browser: Chromium uses CDP; Firefox uses bundled $geckodriverVersion"
+# --- 4. Browsers: no driver downloads ---
+Write-Host '  browser: Chromium uses CDP; Firefox uses built-in WebDriver BiDi'
 $firefoxStatus = & $python (Join-Path $PSScriptRoot 'firefox-use.py') --json doctor 2>$null | ConvertFrom-Json
 if ($firefoxStatus.firefox) {
   Write-Host "  firefox: $($firefoxStatus.firefox)"

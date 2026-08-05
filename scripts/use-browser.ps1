@@ -7,7 +7,7 @@
 # Detection mirrors the engine's fast `browser_open` tool: env vars WITH hardcoded
 # fallbacks, plus the Windows "App Paths" registry and PATH — so it finds the
 # browser even on non-standard installs. Uses an already-installed browser (no
-# download) -> air-gapped safe. Firefox uses local geckodriver/WebDriver.
+# download) -> air-gapped safe. Firefox uses its built-in WebDriver BiDi endpoint.
 
 param(
   [Parameter(Mandatory=$true)][ValidateSet('chrome','edge','coccoc','brave','opera','firefox','safari')][string]$Browser,

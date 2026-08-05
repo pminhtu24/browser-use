@@ -6,7 +6,7 @@
 #   scripts/use-browser.sh edge 9333      # custom port
 #
 # Uses the browser ALREADY INSTALLED (no download) -> air-gapped safe.
-# Firefox uses the bundled geckodriver/WebDriver helper; Chromium keeps CDP.
+# Firefox uses its built-in WebDriver BiDi endpoint; Chromium keeps CDP.
 set -euo pipefail
 
 BROWSER="${1:-}"; PORT="${2:-9222}"

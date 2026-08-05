@@ -1,13 +1,13 @@
 ---
 name: browser-use
-description: Automate a real, visible Chrome, Edge, Cốc Cốc, Brave, Opera, or Firefox browser when the user asks to open a website, interact with a page, fill forms, take screenshots, or extract information from the live DOM. Always launch the browser the user names through scripts/use-browser; attach browser-use over CDP for Chromium-family browsers and use scripts/firefox-use.py over WebDriver for Firefox.
+description: Automate a real, visible Chrome, Edge, Cốc Cốc, Brave, Opera, or Firefox browser when the user asks to open a website, interact with a page, fill forms, take screenshots, or extract information from the live DOM. Always launch the browser the user names through scripts/use-browser; attach browser-use over CDP for Chromium-family browsers and use scripts/firefox-use.py over WebDriver BiDi for Firefox.
 ---
 
 # Browser Automation (browser-use)
 
 Drive a real browser deterministically and index-by-index. Chromium-family browsers use
-the `browser-use` CLI over Chrome DevTools Protocol (CDP); Firefox uses the bundled
-`scripts/firefox-use.py` helper over local WebDriver. Both paths use installed browsers:
+the `browser-use` CLI over Chrome DevTools Protocol (CDP); Firefox uses
+`scripts/firefox-use.py` over its built-in WebDriver BiDi endpoint. Both paths use installed browsers:
 **pure Python, no Node/npm, no Playwright download.** Safe for internal / air-gapped machines.
 
 > **Pinned tool version:** `browser-use==0.12.6` · **Skill version:** `1.2.0`
@@ -126,7 +126,7 @@ browser-use close                 # close browser + stop daemon
 
 ## Firefox workflow
 
-Route Firefox through the bundled WebDriver helper, never through Chromium CDP:
+Route Firefox through the WebDriver BiDi helper, never through Chromium CDP:
 
 ```bash
 scripts/use-browser.sh firefox
@@ -149,12 +149,11 @@ standard per-user install paths. If discovery still fails, locate the binary, se
 `FIREFOX_BINARY` for the current process only, and rerun `doctor`; do not require a
 permanent environment variable for a standard installation.
 
-Require installed Firefox. On Windows x64, use the bundled geckodriver without a
-download, installation, `PATH` change, or administrator access. `GECKODRIVER` may
-override it; Linux and macOS continue to use `geckodriver` on `PATH`. Set
-`FIREFOX_BINARY` for a non-standard Firefox location. Open a visible browser with the
-managed profile named `automation`; create it automatically when absent. Do not claim to attach to a normally-open
-Firefox instance.
+Require installed Firefox; geckodriver is not used. The helper launches Firefox's
+loopback-only Remote Agent, keeps one WebDriver BiDi WebSocket alive in a
+token-protected loopback broker, and creates the managed profile named `automation`
+when absent. Set `FIREFOX_BINARY` for a non-standard Firefox location. Do not claim to
+attach to a normally-open Firefox instance.
 
 Firefox supports three profile modes:
 
@@ -223,9 +222,9 @@ On Linux, headed mode requires `DISPLAY` or `WAYLAND_DISPLAY`.
 
 ### Firefox
 
-- Run `scripts/firefox-use.py doctor` to verify Firefox, geckodriver, profile storage, and display readiness.
+- Run `scripts/firefox-use.py doctor` to verify Firefox, WebDriver BiDi, profile storage, and display readiness.
 - On Windows, exhaust automatic and standard-path discovery before asking the user to locate Firefox; see `REFERENCE.md`.
-- On Windows x64, keep `vendor/geckodriver/windows-x64/geckodriver.exe` with the skill; never download a driver at runtime.
+- Do not install or download geckodriver; Firefox exposes WebDriver BiDi itself.
 - If a native profile is locked, close normal Firefox before cloning it.
 - If an element index is stale, run `state` again instead of retrying the old index.
 

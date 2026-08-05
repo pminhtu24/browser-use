@@ -2,14 +2,6 @@
   "slug": "browser-use",
   "skillVersion": "1.2.0",
   "pinnedToolVersion": "0.12.6",
-  "bundledGeckodriver": {
-    "version": "0.37.1",
-    "platform": "windows-x64",
-    "source": "https://github.com/mozilla/geckodriver/releases/download/v0.37.1/geckodriver-v0.37.1-win64.zip",
-    "archiveSha256": "dfed9315abe8d2fbc1b6161a2ee8002452e79cf05ee92fdc653a4e26bc35edd8",
-    "binarySha256": "e95b4eac7960ffcd5acbfd92bb7d49d48f99c1d01a20ddd297fef8c80821020d",
-    "license": "MPL-2.0"
-  },
   "setupComplete": false,
   "prerequisites": {
     "python": {
@@ -25,7 +17,7 @@
     "systemBrowser": {
       "required": true,
       "installed": false,
-      "description": "An installed Chromium-family browser for CDP, or Firefox; Windows x64 geckodriver is bundled for local WebDriver automation."
+      "description": "An installed Chromium-family browser for CDP, or Firefox with its built-in WebDriver BiDi endpoint."
     },
     "hardening": {
       "required": true,
@@ -38,8 +30,8 @@
     "unix": "scripts/setup.sh",
     "offline": "On a connected machine run `pip download browser-use==0.12.6 -d <folder>` (57 pure-python/small wheels, no Rust, no Playwright). Set BROWSER_USE_WHEELHOUSE to that folder; setup installs with pip --no-index.",
     "online": "If a proxy exists, setup falls back to `pip install browser-use==0.12.6`.",
-    "browser": "NO browser or driver download needed. Chromium uses scripts/use-browser plus browser-use CDP; Firefox on Windows x64 uses the bundled pinned geckodriver."
+    "browser": "NO browser or driver download needed. Chromium uses scripts/use-browser plus browser-use CDP; Firefox uses its built-in WebDriver BiDi endpoint."
   },
   "verifySetup": "browser-use doctor && python scripts/firefox-use.py doctor",
-  "notes": "Version 1.2.0. Hardened for air-gapped machines: no telemetry, cloud, tunnels, browser download, or Windows x64 driver download. Chromium uses CDP unchanged; Firefox adds managed persistent profiles over loopback WebDriver."
+  "notes": "Version 1.2.0. Hardened for air-gapped machines: no telemetry, cloud, tunnels, browser download, or driver download. Chromium uses CDP unchanged; Firefox uses WebDriver BiDi over a token-protected loopback broker and keeps managed persistent profiles."
 }

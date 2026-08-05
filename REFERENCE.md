@@ -152,23 +152,15 @@ Global options must precede the command:
 
 | Option | Description |
 |--------|-------------|
-| `--session NAME` | Select a persistent named session (default `default`) |
-| `--profile NAME` | Use a managed profile, or temporarily clone a closed native profile |
 | `--json` | Emit machine-readable JSON |
 | `--headed` | Compatibility flag; Firefox is already visible by default |
 
 ```bash
-# Browser/session lifecycle
+# Shared browser lifecycle
 scripts/firefox-use.py start
-scripts/firefox-use.py sessions
-scripts/firefox-use.py --session work open https://example.com
-scripts/firefox-use.py --session work close
-scripts/firefox-use.py close --all
+scripts/firefox-use.py open https://example.com
+scripts/firefox-use.py close
 scripts/firefox-use.py doctor
-scripts/firefox-use.py profile list
-scripts/firefox-use.py profile create work
-scripts/firefox-use.py profile create social --from default-release
-scripts/firefox-use.py profile delete work
 
 # Navigation, state, tabs
 scripts/firefox-use.py open <url>
@@ -208,24 +200,28 @@ scripts/firefox-use.py screenshot <path.png>
 and accessible iframes. Its indices expire when the DOM changes. Cookie export/clear
 covers origins visited by that Firefox session.
 
-## Firefox profiles
+## Firefox profile and lifecycle
 
-`profile list` marks Firefox-owned profiles as `native` and persistent automation
-profiles as `managed`. Native names clone the closed source for one session and
-delete that temporary clone on close. Managed profiles live under
-`FIREFOX_PROFILE_HOME`, the OS temporary directory on native Firefox/Windows, or the
-Firefox sandbox directory on Snap/Flatpak. They survive `close` and must be removed
-explicitly with `profile delete`.
+All commands use the single persistent profile `automation` and one shared Firefox
+process/BiDi broker. The profile lives under `FIREFOX_PROFILE_HOME` when set, the
+Firefox sandbox directory on Snap/Flatpak, or `/tmp/browser-use-firefox/profiles` on
+native Firefox and Windows. `close` removes only runtime/control files; profile data,
+cookies, and login state remain.
 
-Native discovery supports both legacy `profiles.ini` names and modern Firefox
-Profile Groups names shown in the UI, such as `Work`.
+The fixed cache and per-profile command mutex live under `/tmp/browser-use-firefox`.
+`runtime.json` is mode `0600` beside `automation` and records the browser PID, broker,
+Remote Agent port, BiDi session, and startup time. If cache disappears while the broker
+is healthy, the next command restores it. If the broker dies, the next command verifies
+the browser command line and Firefox native lock before terminating the orphan and
+restarting. An unverifiable PID is reported and never killed.
 
-Managed names cannot collide with native names, and one managed profile cannot be
-opened by two sessions simultaneously. Creating from a native profile requires
-Firefox to be closed and never writes changes back to the source profile. Without
-`--profile`, always reuse the persistent managed profile `automation`, creating it when
-absent. An explicit managed profile applies only to that launch. Report a selected
-profile lock instead of switching accounts.
+Chromium also has a native profile lock. Firefox differs only in transport (WebDriver
+BiDi WebSocket) and its internal command mutex; active tab and element indices are
+shared and commands are serialized. Independent concurrent task/tab isolation is not
+provided.
+
+`doctor` reports `profilePath`, `running`, `brokerAlive`, `orphaned`, and `browserPid`
+with a recovery hint when applicable.
 
 On Linux, headed Firefox requires `DISPLAY` or `WAYLAND_DISPLAY`. If the tool runner
 filters GUI variables, forward `DISPLAY`, `XAUTHORITY`, and `DBUS_SESSION_BUS_ADDRESS`;

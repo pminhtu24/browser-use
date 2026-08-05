@@ -149,46 +149,23 @@ standard per-user install paths. If discovery still fails, locate the binary, se
 `FIREFOX_BINARY` for the current process only, and rerun `doctor`; do not require a
 permanent environment variable for a standard installation.
 
-Require installed Firefox; geckodriver is not used. The helper launches Firefox's
-loopback-only Remote Agent, keeps one WebDriver BiDi WebSocket alive in a
-token-protected loopback broker, and creates the managed profile named `automation`
-when absent. Set `FIREFOX_BINARY` for a non-standard Firefox location. Do not claim to
-attach to a normally-open Firefox instance.
+Require installed Firefox; geckodriver is not used. Every command reuses one Firefox
+process, one token-protected loopback BiDi broker, and the persistent managed profile
+`automation`. `close` closes that shared process; the next command opens it again with
+the same profile, cookies, and login state. Set `FIREFOX_BINARY` only for a non-standard
+Firefox location. Do not claim to attach to a normally-open Firefox instance.
 
-Firefox supports three profile modes:
+Control cache and command mutex files live under `/tmp/browser-use-firefox`. Private
+`runtime.json` lives beside the managed profile and allows cache recovery without
+restarting a healthy browser. Set only `FIREFOX_PROFILE_HOME` to relocate `automation`
+or isolate a test. Native Firefox profiles are never discovered, cloned, or modified.
 
-- No `--profile`: always reuse the persistent managed profile `automation`, creating it when absent.
-- `--profile NATIVE_NAME`: clone a closed native profile for this session, then delete the clone on close.
-- `--profile MANAGED_NAME`: reuse a persistent automation profile across browser restarts.
-
-By default, Firefox automation state lives under the OS temporary directory at
-`browser-use-firefox/state`. Managed profiles use `browser-use-firefox/profiles` there
-on native Firefox and Windows, or Firefox's persistent sandbox directory on Snap and
-Flatpak. Set `FIREFOX_STATE_HOME` and `FIREFOX_PROFILE_HOME` to override these locations
-(`BROWSER_USE_HOME` remains a backward-compatible state alias).
-
-`profile list` recognizes both legacy `profiles.ini` names and modern Firefox Profile
-Groups names shown in the UI, such as `Work`; either native name can be passed to
-`--profile` and is cloned only after Firefox is closed.
-
-Create and manage persistent profiles without modifying the native source:
-
-```bash
-scripts/firefox-use.py profile list
-scripts/firefox-use.py profile create work
-scripts/firefox-use.py profile create social --from "default-release"
-scripts/firefox-use.py --profile social open https://example.com
-scripts/firefox-use.py profile delete work
-```
-
-Reject a locked native profile and ask the user to close Firefox before cloning. A
-managed profile may be used by only one session at a time. `close` preserves managed
-profiles; `profile delete` removes them. Managed profiles contain sensitive cookies
-and login tokens, so protect their storage like a native browser profile.
-
-Reuse the same `--session` to continue controlling an existing Firefox window. An
-explicit `--profile NAME` applies only to that launch; later automatic launches return
-to `automation`. If the selected profile is locked, report the lock instead of switching accounts.
+Firefox and Chromium both enforce a native profile lock. The Firefox helper additionally
+holds a startup/command mutex for at most one CLI command, so concurrent commands wait
+up to 60 seconds and reuse the same browser instead of racing the profile. If the broker
+dies, the next command verifies the locked browser PID belongs to `automation`, closes
+that orphan, waits for Firefox's native lock to clear, and restarts. It never removes a
+native lock while its PID is alive and never kills an unverifiable process.
 
 Run `state` before every indexed interaction and again after navigation, tab switches,
 or DOM updates. Use `state`, `get text`, scoped `get html`, or `eval` to read pages;
@@ -204,7 +181,7 @@ scripts/firefox-use.py screenshot ./shot.png
 scripts/firefox-use.py close
 ```
 
-Put global options before the command: `--session NAME`, `--profile NAME`, or `--json`.
+Put the global `--json` option before the command.
 Firefox is headed by default; set `FIREFOX_USE_HEADLESS=true` only for automation tests.
 On Linux, headed mode requires `DISPLAY` or `WAYLAND_DISPLAY`.
 
@@ -225,7 +202,8 @@ On Linux, headed mode requires `DISPLAY` or `WAYLAND_DISPLAY`.
 - Run `scripts/firefox-use.py doctor` to verify Firefox, WebDriver BiDi, profile storage, and display readiness.
 - On Windows, exhaust automatic and standard-path discovery before asking the user to locate Firefox; see `REFERENCE.md`.
 - Do not install or download geckodriver; Firefox exposes WebDriver BiDi itself.
-- If a native profile is locked, close normal Firefox before cloning it.
+- If `doctor` reports `orphaned`, run any browser command to recover it, or run `close`.
+- If recovery refuses an unverifiable PID, inspect the reported PID; the helper preserves the profile lock for safety.
 - If an element index is stale, run `state` again instead of retrying the old index.
 
 ## Updating

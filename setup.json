@@ -33,5 +33,5 @@
     "browser": "NO browser or driver download needed. Chromium uses scripts/use-browser plus browser-use CDP; Firefox uses its built-in WebDriver BiDi endpoint."
   },
   "verifySetup": "browser-use doctor && python scripts/firefox-use.py doctor",
-  "notes": "Version 1.2.0. Hardened for air-gapped machines: no telemetry, cloud, tunnels, browser download, or driver download. Chromium uses CDP unchanged; Firefox uses WebDriver BiDi over a token-protected loopback broker and keeps managed persistent profiles."
+  "notes": "Version 1.2.0. Hardened for air-gapped machines: no telemetry, cloud, tunnels, browser download, or driver download. Chromium uses CDP unchanged; Firefox reuses one WebDriver BiDi broker, process, and persistent automation profile."
 }

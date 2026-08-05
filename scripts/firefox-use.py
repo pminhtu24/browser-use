@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
-import configparser
+import hashlib
 import json
 import os
 import re
@@ -14,11 +14,11 @@ import secrets
 import shutil
 import signal
 import socket
-import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
@@ -27,7 +27,6 @@ from urllib.request import Request, urlopen
 import aiohttp
 from aiohttp import web
 
-PROFILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 PROFILE_LOCKS = ("parent.lock", ".parentlock", "lock")
 KEYS = {
     "Null": "\ue000", "Backspace": "\ue003", "Tab": "\ue004", "Enter": "\ue007",
@@ -38,14 +37,7 @@ KEYS = {
 
 
 def home() -> Path:
-    if configured := os.environ.get("FIREFOX_STATE_HOME"):
-        root = Path(configured).expanduser()
-    elif configured := os.environ.get("BROWSER_USE_HOME"):
-        root = Path(configured).expanduser() / "firefox"
-    else:
-        root = Path(tempfile.gettempdir()) / "browser-use-firefox" / "state"
-    root.mkdir(parents=True, exist_ok=True)
-    return root
+    return secure_directory(Path(tempfile.gettempdir()) / "browser-use-firefox")
 
 
 def secure_directory(path: Path) -> Path:
@@ -55,27 +47,20 @@ def secure_directory(path: Path) -> Path:
     return path
 
 
-def safe_session(session: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9_.-]", "_", session)
+def state_path() -> Path:
+    digest = hashlib.sha256(str(automation_profile()).encode()).hexdigest()[:16]
+    return secure_directory(home() / "state") / f"{digest}.json"
 
 
-def state_path(session: str) -> Path:
-    return home() / f"{safe_session(session)}.json"
-
-
-def load_state(session: str) -> dict:
+def load_state() -> dict:
     try:
-        return json.loads(state_path(session).read_text(encoding="utf-8"))
+        return json.loads(state_path().read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
 
 
-def save_state(session: str, state: dict) -> None:
-    path = state_path(session)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state), encoding="utf-8")
-    os.chmod(tmp, 0o600)
-    tmp.replace(path)
+def save_state(state: dict) -> None:
+    write_private_json(state_path(), state)
 
 
 async def _request(websocket_url: str, method: str, params: dict, timeout: float):
@@ -237,6 +222,19 @@ async def run_broker(websocket_url: str, port: int, token: str) -> None:
         runner = web.AppRunner(application, access_log=None)
         await runner.setup()
         await web.TCPSite(runner, "127.0.0.1", port).start()
+
+        async def shutdown() -> None:
+            try:
+                await send("browser.close", {})
+            except Exception:
+                pass
+            finally:
+                stopped.set()
+
+        if os.name != "nt":
+            loop = asyncio.get_running_loop()
+            for signal_name in (signal.SIGTERM, signal.SIGINT):
+                loop.add_signal_handler(signal_name, lambda: asyncio.create_task(shutdown()))
         await stopped.wait()
     finally:
         if runner:
@@ -283,120 +281,57 @@ def find_firefox() -> str | None:
     return next((path for path in candidates if path and Path(path).is_file()), None)
 
 
-def profile_ini() -> Path | None:
-    if configured := os.environ.get("FIREFOX_PROFILES_INI"):
-        path = Path(configured)
-        return path if path.is_file() else None
-    native = Path.home() / ".mozilla" / "firefox" / "profiles.ini"
-    snap = Path.home() / "snap" / "firefox" / "common" / ".mozilla" / "firefox" / "profiles.ini"
-    flatpak = Path.home() / ".var" / "app" / "org.mozilla.firefox" / ".mozilla" / "firefox" / "profiles.ini"
-    candidates = [native, snap, flatpak] + [
-        Path.home() / "Library" / "Application Support" / "Firefox" / "profiles.ini",
-        Path(os.environ.get("APPDATA", "")) / "Mozilla" / "Firefox" / "profiles.ini",
-    ]
-    return next((path for path in candidates if path.is_file()), None)
+def headless_enabled() -> bool:
+    return os.environ.get("FIREFOX_USE_HEADLESS", "").lower() in {"1", "true", "yes"}
+
+
+def headed_ready() -> bool:
+    return not sys.platform.startswith("linux") or bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
 def profile_home() -> Path:
     if configured := os.environ.get("FIREFOX_PROFILE_HOME"):
-        return secure_directory(Path(configured).expanduser())
-    installation = firefox_installation()
-    if installation == "snap":
+        root = Path(configured).expanduser()
+    elif firefox_installation() == "snap":
         root = Path.home() / "snap" / "firefox" / "common" / ".browser-use-profiles"
-    elif installation == "flatpak":
+    elif firefox_installation() == "flatpak":
         root = Path.home() / ".var" / "app" / "org.mozilla.firefox" / ".browser-use-profiles"
     else:
         root = Path(tempfile.gettempdir()) / "browser-use-firefox" / "profiles"
-    return secure_directory(root)
+    return root
 
 
-def validate_profile_name(name: str) -> str:
-    if not PROFILE_NAME.fullmatch(name):
-        raise RuntimeError("Profile name must be 1-64 characters: letters, numbers, dot, underscore, or dash.")
-    return name
+def automation_root() -> Path:
+    return profile_home() / "managed" / "automation"
+
+
+def automation_profile() -> Path:
+    return automation_root() / "profile"
+
+
+def runtime_path() -> Path:
+    return automation_root() / "runtime.json"
+
+
+def ensure_private_directory(path: Path) -> Path:
+    if not path.exists():
+        path.mkdir(parents=True, mode=0o700)
+        if os.name != "nt":
+            os.chmod(path, 0o700)
+    return path
+
+
+def ensure_automation_profile() -> Path:
+    ensure_private_directory(profile_home())
+    root = ensure_private_directory(automation_root())
+    profile = ensure_private_directory(root / "profile")
+    if not (root / "meta.json").exists():
+        write_private_json(root / "meta.json", {"name": "automation", "createdAt": int(time.time())})
+    return profile
 
 
 def profile_locked(path: Path) -> bool:
     return any((path / name).exists() or (path / name).is_symlink() for name in PROFILE_LOCKS)
-
-
-def firefox_profiles() -> list[dict]:
-    ini = profile_ini()
-    if not ini:
-        return []
-    config = configparser.ConfigParser()
-    config.read(ini, encoding="utf-8")
-    profiles = []
-    stores = set()
-    for section in config.sections():
-        if not section.startswith("Profile") or "Path" not in config[section]:
-            continue
-        value = config[section]
-        path = Path(value["Path"])
-        if value.get("IsRelative", "1") == "1":
-            path = ini.parent / path
-        if value.get("StoreID"):
-            stores.add(value["StoreID"])
-        profiles.append({
-            "kind": "native", "name": value.get("Name", section), "path": str(path),
-            "default": value.get("Default") == "1", "locked": profile_locked(path),
-        })
-    default_paths = {Path(item["path"]).resolve() for item in profiles if item["default"]}
-    grouped = []
-    for store in stores:
-        database = ini.parent / "Profile Groups" / f"{store}.sqlite"
-        if not database.is_file():
-            continue
-        try:
-            with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
-                rows = connection.execute("SELECT path, name FROM Profiles ORDER BY id").fetchall()
-        except (OSError, sqlite3.Error):
-            continue
-        for raw_path, name in rows:
-            path = Path(raw_path)
-            if not path.is_absolute():
-                path = ini.parent / path
-            grouped.append({
-                "kind": "native", "name": name, "path": str(path),
-                "default": path.resolve() in default_paths, "locked": profile_locked(path),
-            })
-    if grouped:
-        grouped_paths = {Path(item["path"]).resolve() for item in grouped}
-        return grouped + [item for item in profiles if Path(item["path"]).resolve() not in grouped_paths]
-    return profiles
-
-
-def native_profile(name: str) -> dict:
-    profiles = firefox_profiles()
-    selected = next((p for p in profiles if p["name"].casefold() == name.casefold()), None)
-    if name.casefold() in {"default", "default-release"}:
-        selected = selected or next((p for p in profiles if p["default"]), None)
-    if not selected:
-        raise RuntimeError(f"Firefox profile not found: {name}. Run profile list.")
-    return selected
-
-
-def clone_profile(name: str, session: str) -> Path:
-    selected = native_profile(name)
-    source = Path(selected["path"])
-    if profile_locked(source) and firefox_lock_stale(source):
-        clear_firefox_locks(source)
-    if profile_locked(source):
-        raise RuntimeError(f"Firefox profile is locked: {selected['name']}. Close Firefox first.")
-    target = secure_directory(profile_home() / "temporary") / safe_session(session)
-    if target.exists():
-        shutil.rmtree(target)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(source, target, ignore=shutil.ignore_patterns(*PROFILE_LOCKS))
-    return target
-
-
-def managed_root() -> Path:
-    return secure_directory(profile_home() / "managed")
-
-
-def managed_dir(name: str) -> Path:
-    return managed_root() / validate_profile_name(name)
 
 
 def read_json_file(path: Path) -> dict:
@@ -406,140 +341,18 @@ def read_json_file(path: Path) -> dict:
         return {}
 
 
-def managed_metadata(path: Path) -> dict:
-    return read_json_file(path / "meta.json")
-
-
 def write_private_json(path: Path, value: dict) -> None:
-    path.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
-    if os.name != "nt":
-        os.chmod(path, 0o600)
-
-
-def managed_profiles() -> list[dict]:
-    output = []
-    for path in sorted(managed_root().iterdir()):
-        if not path.is_dir() or path.name.startswith(".") or not (path / "profile").is_dir():
-            continue
-        meta = managed_metadata(path)
-        lock = read_json_file(path / ".browser-use-lock")
-        output.append({
-            "kind": "managed", "name": path.name, "path": str(path / "profile"),
-            "source": meta.get("source"), "locked": profile_locked(path / "profile"),
-            "session": lock.get("session"),
-        })
-    return output
-
-
-def resolve_profile(profile: str | None) -> str | None:
-    if profile:
-        return profile
-    if not managed_dir("automation").is_dir():
-        create_managed_profile("automation", None)
-    return "automation"
-
-
-def mark_managed_profile_used(name: str) -> None:
-    path = managed_dir(name)
-    metadata = managed_metadata(path)
-    metadata["lastUsedAt"] = time.time_ns()
-    write_private_json(path / "meta.json", metadata)
-
-
-def create_managed_profile(name: str, source_name: str | None) -> dict:
-    validate_profile_name(name)
-    if any(item["name"].casefold() == name.casefold() for item in firefox_profiles()):
-        raise RuntimeError(f"Managed profile name conflicts with native Firefox profile: {name}")
-    if any(item["name"].casefold() == name.casefold() for item in managed_profiles()):
-        raise RuntimeError(f"Managed Firefox profile already exists: {name}")
-    target = managed_dir(name)
-    if target.exists() or target.is_symlink():
-        raise RuntimeError(f"Managed Firefox profile already exists: {name}")
-    source = None
-    if source_name:
-        selected = native_profile(source_name)
-        source = Path(selected["path"])
-        if profile_locked(source):
-            raise RuntimeError(f"Firefox profile is locked: {selected['name']}. Close Firefox first.")
-    temporary = managed_root() / f".{name}.tmp-{os.getpid()}-{time.time_ns()}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
-        temporary.mkdir(mode=0o700)
-        destination = temporary / "profile"
-        if source:
-            shutil.copytree(source, destination, ignore=shutil.ignore_patterns(*PROFILE_LOCKS))
-        else:
-            destination.mkdir(mode=0o700)
-        write_private_json(temporary / "meta.json", {
-            "name": name, "source": source_name, "sourcePath": str(source) if source else None,
-            "createdAt": int(time.time()),
-        })
-        temporary.replace(target)
-    except Exception:
-        shutil.rmtree(temporary, ignore_errors=True)
-        raise
-    return {"kind": "managed", "name": name, "path": str(target / "profile"), "source": source_name}
-
-
-def managed_in_use(name: str) -> str | None:
-    for path in home().glob("*.json"):
-        state = load_state(path.stem)
-        if state.get("profile_kind") == "managed" and state.get("profile") == name and driver_alive(state):
-            return path.stem
-    return None
-
-
-def delete_managed_profile(name: str) -> dict:
-    target = managed_dir(name)
-    if target.is_symlink() or not target.is_dir() or target.resolve().parent != managed_root().resolve():
-        raise RuntimeError(f"Managed Firefox profile not found or unsafe: {name}")
-    if session := managed_in_use(name):
-        raise RuntimeError(f"Managed Firefox profile is in use by session: {session}. Close it first.")
-    lock_state = read_json_file(target / ".browser-use-lock")
-    if process_alive(lock_state.get("pid")):
-        raise RuntimeError(f"Managed Firefox profile is being opened by session: {lock_state.get('session') or 'unknown'}")
-    (target / ".browser-use-lock").unlink(missing_ok=True)
-    if profile_locked(target / "profile") and firefox_lock_stale(target / "profile"):
-        clear_managed_firefox_locks(name)
-    if profile_locked(target / "profile"):
-        raise RuntimeError(f"Managed Firefox profile is locked: {name}. Close Firefox first.")
-    shutil.rmtree(target)
-    return {"deleted": name}
-
-
-def headless_enabled() -> bool:
-    return os.environ.get("FIREFOX_USE_HEADLESS", "").lower() in {"1", "true", "yes"}
-
-
-def headed_ready() -> bool:
-    return not sys.platform.startswith("linux") or bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
-
-
-def firefox_installation() -> str:
-    binary = str(find_firefox() or "").replace("\\", "/")
-    if "/snap/" in binary:
-        return "snap"
-    if "/flatpak/" in binary or "/.var/app/org.mozilla.firefox/" in binary:
-        return "flatpak"
-    value = str(profile_ini() or "").replace("\\", "/")
-    if "/snap/firefox/common/" in value:
-        return "snap"
-    if "/.var/app/org.mozilla.firefox/" in value:
-        return "flatpak"
-    return "native"
-
-
-def driver_alive(state: dict) -> bool:
-    try:
-        if not process_alive(state["pid"]) or not process_alive(state["broker_pid"]):
-            return False
-        call(state, "session.status", timeout=1)
-        return True
-    except (KeyError, RuntimeError, ValueError):
-        return False
-
-
-def managed_lock_path(name: str) -> Path:
-    return managed_dir(name) / ".browser-use-lock"
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(value, stream, ensure_ascii=False, indent=2)
+        temporary.replace(path)
+        if os.name != "nt":
+            os.chmod(path, 0o600)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def process_alive(pid: object) -> bool:
@@ -559,55 +372,6 @@ def process_alive(pid: object) -> bool:
         return False
 
 
-def firefox_lock_stale(profile: Path) -> bool:
-    lock = profile / "lock"
-    if not lock.is_symlink():
-        return False
-    match = re.search(r"\+(\d+)$", os.readlink(lock))
-    return bool(match and not process_alive(match.group(1)))
-
-
-def clear_firefox_locks(profile: Path) -> None:
-    for name in PROFILE_LOCKS:
-        (profile / name).unlink(missing_ok=True)
-
-
-def acquire_managed_profile(name: str, session: str) -> Path:
-    target = managed_dir(name)
-    profile = target / "profile"
-    if target.is_symlink() or not profile.is_dir() or target.resolve().parent != managed_root().resolve():
-        raise RuntimeError(f"Managed Firefox profile not found or unsafe: {name}")
-    lock = managed_lock_path(name)
-    if lock.exists() or lock.is_symlink():
-        lock_state = read_json_file(lock)
-        owner = lock_state.get("session")
-        state = load_state(str(owner)) if owner else {}
-        if owner and state.get("profile_kind") == "managed" and state.get("profile") == name and driver_alive(state):
-            raise RuntimeError(f"Managed Firefox profile is in use by session: {owner}")
-        if process_alive(lock_state.get("pid")):
-            raise RuntimeError(f"Managed Firefox profile is already being opened by session: {owner or 'unknown'}")
-        lock.unlink(missing_ok=True)
-    if profile_locked(profile) and firefox_lock_stale(profile):
-        clear_firefox_locks(profile)
-    if profile_locked(profile):
-        raise RuntimeError(f"Managed Firefox profile is locked: {name}. Close Firefox first.")
-    try:
-        descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        raise RuntimeError(f"Managed Firefox profile is already being opened: {name}") from None
-    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-        json.dump({"session": session, "pid": os.getpid()}, stream)
-    return profile
-
-
-def release_managed_profile(name: str | None, session: str) -> None:
-    if not name:
-        return
-    lock = managed_lock_path(name)
-    if read_json_file(lock).get("session") == session:
-        lock.unlink(missing_ok=True)
-
-
 def wait_for_profile_unlock(path: Path, timeout: float = 5) -> bool:
     deadline = time.monotonic() + timeout
     while profile_locked(path) and time.monotonic() < deadline:
@@ -615,70 +379,256 @@ def wait_for_profile_unlock(path: Path, timeout: float = 5) -> bool:
     return not profile_locked(path)
 
 
-def clear_managed_firefox_locks(name: str) -> None:
-    target = managed_dir(name)
-    if target.is_symlink() or target.resolve().parent != managed_root().resolve():
-        return
-    profile = target / "profile"
-    for lock_name in PROFILE_LOCKS:
-        lock = profile / lock_name
-        if lock.exists() or lock.is_symlink():
-            lock.unlink(missing_ok=True)
+def is_snap_launcher(binary: str) -> bool:
+    normalized = binary.replace("\\", "/")
+    if "/snap/" in normalized or normalized == "/snap/bin/firefox":
+        return True
+    try:
+        launcher = Path(binary).resolve()
+        content = Path(binary).read_text(encoding="utf-8", errors="ignore")[:8192]
+        return "/snap/" in str(launcher) or "snap/bin/firefox" in content or "exec snap" in content
+    except OSError:
+        return False
 
 
-def remove_profile_clone(value: str | None) -> None:
-    if not value:
-        return
-    target = Path(value).resolve()
-    allowed = {
-        (home() / "profiles").resolve(),
-        (profile_home() / "temporary").resolve(),
-    }
-    if target.parent in allowed:
-        shutil.rmtree(target, ignore_errors=True)
+def firefox_installation() -> str:
+    binary = str(find_firefox() or "").replace("\\", "/")
+    if is_snap_launcher(binary):
+        return "snap"
+    if "/flatpak/" in binary or "/.var/app/org.mozilla.firefox/" in binary:
+        return "flatpak"
+    return "native"
 
 
-def stop(session: str, state: dict) -> None:
-    if not state:
-        state_path(session).unlink(missing_ok=True)
-        return
-    if driver_alive(state):
+def driver_alive(state: dict) -> bool:
+    try:
+        browser_pid = state.get("browser_pid", state.get("pid"))
+        if not process_alive(browser_pid) or not process_alive(state["broker_pid"]):
+            return False
+        call(state, "session.status", timeout=1)
+        return True
+    except (KeyError, RuntimeError, ValueError):
+        return False
+
+
+def firefox_lock_pid(profile: Path) -> int | None:
+    lock = profile / "lock"
+    if not lock.is_symlink():
+        return None
+    try:
+        match = re.search(r"\+(\d+)$", os.readlink(lock))
+        return int(match.group(1)) if match else None
+    except OSError:
+        return None
+
+
+def firefox_lock_stale(profile: Path) -> bool:
+    pid = firefox_lock_pid(profile)
+    return pid is not None and not process_alive(pid)
+
+
+def clear_firefox_locks(profile: Path) -> None:
+    pid = firefox_lock_pid(profile)
+    if pid is not None and process_alive(pid):
+        raise RuntimeError(f"Refusing to remove Firefox native lock while PID {pid} is alive.")
+    for name in PROFILE_LOCKS:
+        (profile / name).unlink(missing_ok=True)
+
+
+def process_command(pid: object) -> str:
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return ""
+    if sys.platform.startswith("linux"):
+        try:
+            return Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+        except OSError:
+            return ""
+    if os.name == "nt":
+        command = [
+            "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+            f"(Get-CimInstance Win32_Process -Filter \"ProcessId = {pid}\").CommandLine",
+        ]
+    else:
+        command = ["ps", "-p", str(pid), "-o", "command="]
+    try:
+        return subprocess.run(command, capture_output=True, text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def verified_browser_process(pid: object, profile: Path) -> bool:
+    if not process_alive(pid):
+        return False
+    command = process_command(pid)
+    expected = str(profile.resolve())
+    if expected not in command or "remote-debugging-port" not in command:
+        return False
+    lock_pid = firefox_lock_pid(profile)
+    return lock_pid in (None, int(pid))
+
+
+def terminate_browser(pid: object, profile: Path) -> None:
+    if not verified_browser_process(pid, profile):
+        raise RuntimeError(f"Firefox PID {pid} could not be verified for profile {profile}; refusing to terminate it.")
+    pid = int(pid)
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except PermissionError as error:
+        raise RuntimeError(
+            f"Firefox PID {pid} belongs to automation but the OS denied termination. "
+            "Run the command outside the sandbox or close that Firefox process, then retry."
+        ) from error
+    except ProcessLookupError:
+        pass
+    deadline = time.monotonic() + 5
+    while process_alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    if process_alive(pid) and os.name != "nt":
+        os.kill(pid, signal.SIGKILL)
+        deadline = time.monotonic() + 5
+        while process_alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.1)
+    if process_alive(pid):
+        raise RuntimeError(f"Firefox PID {pid} did not exit; native profile lock was preserved.")
+    if profile_locked(profile):
+        clear_firefox_locks(profile)
+
+
+async def _close_remote_browser(port: int) -> None:
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as client:
+        async with client.ws_connect(f"ws://127.0.0.1:{port}/session", max_msg_size=0) as websocket:
+            for command_id, method, params in (
+                (1, "session.new", {"capabilities": {"alwaysMatch": {"browserName": "firefox"}}}),
+                (2, "browser.close", {}),
+            ):
+                await websocket.send_json({"id": command_id, "method": method, "params": params})
+                while True:
+                    message = await websocket.receive()
+                    if message.type != aiohttp.WSMsgType.TEXT:
+                        if method == "browser.close":
+                            return
+                        raise RuntimeError("Firefox closed the recovery BiDi connection")
+                    result = json.loads(message.data)
+                    if result.get("id") != command_id:
+                        continue
+                    if result.get("type") == "error":
+                        raise RuntimeError(result.get("message") or result.get("error") or "BiDi recovery failed")
+                    break
+
+
+def close_remote_browser(state: dict, profile: Path) -> bool:
+    if not state.get("port"):
+        return False
+    try:
+        asyncio.run(_close_remote_browser(int(state["port"])))
+        return wait_for_profile_unlock(profile)
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError, RuntimeError, ValueError):
+        return False
+
+
+@contextmanager
+def command_mutex(timeout: float = 60):
+    digest = hashlib.sha256(str(automation_profile()).encode()).hexdigest()[:16]
+    path = secure_directory(home() / "locks") / f"{digest}.lock"
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                json.dump({"pid": os.getpid(), "createdAt": int(time.time())}, stream)
+            break
+        except FileExistsError:
+            owner = read_json_file(path).get("pid")
+            if owner and not process_alive(owner):
+                path.unlink(missing_ok=True)
+                continue
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"Timed out waiting {timeout:g} seconds for Firefox command mutex (owner PID {owner or 'unknown'}).")
+            time.sleep(0.1)
+    try:
+        yield
+    finally:
+        if read_json_file(path).get("pid") == os.getpid():
+            path.unlink(missing_ok=True)
+
+
+def runtime_state() -> dict:
+    return read_json_file(runtime_path())
+
+
+def cache_from_runtime(runtime: dict) -> dict:
+    return {**runtime, "elements": [], "origins": runtime.get("origins", [])}
+
+
+def recover_orphan(profile: Path, state: dict) -> None:
+    candidates = [state.get("browser_pid"), state.get("pid"), firefox_lock_pid(profile)]
+    pid = next((int(value) for value in candidates if value and process_alive(value)), None)
+    if pid is not None and state.get("broker_pid") and not process_alive(state["broker_pid"]):
+        deadline = time.monotonic() + 5
+        while process_alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        if not process_alive(pid):
+            pid = None
+    if pid is not None:
+        if not close_remote_browser(state, profile):
+            terminate_browser(pid, profile)
+    elif profile_locked(profile):
+        recorded_pid = state.get("browser_pid", state.get("pid"))
+        if firefox_lock_stale(profile) or (recorded_pid and not process_alive(recorded_pid)):
+            clear_firefox_locks(profile)
+        else:
+            raise RuntimeError(f"Firefox profile is locked but its process cannot be verified: {profile}")
+    broker_pid = state.get("broker_pid")
+    if process_alive(broker_pid):
+        try:
+            os.kill(int(broker_pid), signal.SIGTERM)
+        except (OSError, ValueError):
+            pass
+    runtime_path().unlink(missing_ok=True)
+    state_path().unlink(missing_ok=True)
+
+
+def stop(state: dict | None = None) -> None:
+    profile = automation_profile()
+    state = state or load_state() or runtime_state()
+    if state and process_alive(state.get("broker_pid")):
         try:
             broker_request(state, "__stop__")
         except RuntimeError:
             pass
-    if state.get("profile_kind") == "managed":
-        name = state.get("profile")
-        profile = managed_dir(name) / "profile"
-        unlocked = wait_for_profile_unlock(profile)
-        if not unlocked and firefox_lock_stale(profile):
-            clear_managed_firefox_locks(name)
-    if process_alive(state.get("pid")):
+    wait_for_profile_unlock(profile)
+    browser_pid = state.get("browser_pid", state.get("pid")) if state else firefox_lock_pid(profile)
+    if process_alive(browser_pid):
+        if not close_remote_browser(state, profile):
+            terminate_browser(browser_pid, profile)
+    broker_pid = state.get("broker_pid") if state else None
+    if process_alive(broker_pid):
         try:
-            os.kill(int(state["pid"]), signal.SIGTERM)
-        except (KeyError, OSError, ValueError):
+            os.kill(int(broker_pid), signal.SIGTERM)
+        except (OSError, ValueError):
             pass
-    if process_alive(state.get("broker_pid")):
-        try:
-            os.kill(int(state["broker_pid"]), signal.SIGTERM)
-        except (KeyError, OSError, ValueError):
-            pass
-    if state.get("profile_kind") == "managed":
-        release_managed_profile(state.get("profile"), session)
-    else:
-        remove_profile_clone(state.get("profile_clone"))
-    state_path(session).unlink(missing_ok=True)
+    if profile_locked(profile) and firefox_lock_stale(profile):
+        clear_firefox_locks(profile)
+    runtime_path().unlink(missing_ok=True)
+    state_path().unlink(missing_ok=True)
 
 
-def start(session: str, profile: str | None = None) -> dict:
-    current = load_state(session)
+def start() -> dict:
+    profile = automation_profile()
+    current = load_state()
     if current and driver_alive(current):
-        if profile and current.get("profile") != profile:
-            raise RuntimeError(f"Session {session} is already running with another profile.")
         return current
-    if current:
-        stop(session, current)
-    profile = resolve_profile(profile)
+    runtime = runtime_state()
+    if runtime and driver_alive(runtime):
+        current = cache_from_runtime(runtime)
+        save_state(current)
+        return current
+    stale = runtime or current
+    if stale or profile_locked(profile):
+        recover_orphan(profile, stale)
+    profile = ensure_automation_profile()
 
     firefox = find_firefox()
     if not firefox:
@@ -689,19 +639,6 @@ def start(session: str, profile: str | None = None) -> dict:
             "Forward DISPLAY, XAUTHORITY, and DBUS_SESSION_BUS_ADDRESS from the desktop session, "
             "or set FIREFOX_USE_HEADLESS=true for tests."
         )
-
-    profile_kind = None
-    profile_path = None
-    clone = None
-    if profile:
-        managed = managed_root() / profile if PROFILE_NAME.fullmatch(profile) else None
-        if managed and managed.is_dir() and not managed.is_symlink():
-            profile_kind = "managed"
-            profile_path = acquire_managed_profile(profile, session)
-        else:
-            profile_kind = "native"
-            clone = clone_profile(profile, session)
-            profile_path = clone
     port, broker_port = free_port(), free_port()
     while broker_port == port:
         broker_port = free_port()
@@ -713,21 +650,11 @@ def start(session: str, profile: str | None = None) -> dict:
     else:
         popen_args["start_new_session"] = True
     broker = None
-    try:
-        browser_args = [firefox, "--no-remote", "--remote-debugging-port", str(port)]
-        if headless_enabled():
-            browser_args.append("-headless")
-        if profile_path:
-            browser_args.extend(("-profile", str(profile_path)))
-        process = subprocess.Popen(
-            browser_args,
-            creationflags=creationflags, **popen_args,
-        )
-    except Exception:
-        remove_profile_clone(str(clone) if clone else None)
-        if profile_kind == "managed":
-            release_managed_profile(profile, session)
-        raise
+    browser_args = [firefox, "--no-remote", "--remote-debugging-port", str(port)]
+    if headless_enabled():
+        browser_args.append("-headless")
+    browser_args.extend(("-profile", str(profile)))
+    process = subprocess.Popen(browser_args, creationflags=creationflags, **popen_args)
     try:
         websocket_url = f"ws://127.0.0.1:{port}/session"
         last_error = None
@@ -742,7 +669,6 @@ def start(session: str, profile: str | None = None) -> dict:
             time.sleep(0.1)
         else:
             raise RuntimeError(f"Firefox WebDriver BiDi did not become ready: {last_error}")
-
         broker = subprocess.Popen([
             sys.executable, str(Path(__file__).resolve()), "_broker",
             "--websocket-url", websocket_url, "--port", str(broker_port), "--token", broker_token,
@@ -759,18 +685,16 @@ def start(session: str, profile: str | None = None) -> dict:
             time.sleep(0.1)
         else:
             raise RuntimeError(f"Firefox BiDi broker did not become ready: {last_error}")
-
-        session_id = value["sessionId"]
-        state = {
-            "pid": process.pid, "port": port, "session_id": session_id,
-            "broker_pid": broker.pid, "broker_port": broker_port, "broker_token": broker_token,
-            "elements": [], "origins": [], "profile": profile,
-            "profile_kind": profile_kind, "profile_path": str(profile_path) if profile_path else None,
-            "profile_clone": str(clone) if clone else None,
+        browser_pid = firefox_lock_pid(profile) or process.pid
+        runtime = {
+            "browser_pid": browser_pid, "launcher_pid": process.pid, "port": port,
+            "session_id": value["sessionId"], "broker_pid": broker.pid,
+            "broker_port": broker_port, "broker_token": broker_token,
+            "profile_path": str(profile), "started_at": int(time.time()),
         }
-        if profile_kind == "managed":
-            mark_managed_profile_used(profile)
-        save_state(session, state)
+        write_private_json(runtime_path(), runtime)
+        state = cache_from_runtime(runtime)
+        save_state(state)
         return state
     except Exception:
         if broker:
@@ -787,20 +711,19 @@ def start(session: str, profile: str | None = None) -> dict:
             process.wait(timeout=5)
         except OSError:
             pass
-        remove_profile_clone(str(clone) if clone else None)
-        if profile_kind == "managed":
-            release_managed_profile(profile, session)
+        if profile_locked(profile) and firefox_lock_stale(profile):
+            clear_firefox_locks(profile)
         raise
 
 
-def active(session: str, profile: str | None = None) -> dict:
-    state = start(session, profile)
+def active() -> dict:
+    state = start()
     try:
         call(state, "browsingContext.getTree")
         return state
     except RuntimeError:
-        stop(session, state)
-        return start(session, profile)
+        stop(state)
+        return start()
 
 
 def origin(url: str) -> str | None:
@@ -808,11 +731,11 @@ def origin(url: str) -> str | None:
     return f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme in {"http", "https"} and parsed.netloc else None
 
 
-def remember_origin(session: str, state: dict, url: str) -> None:
+def remember_origin(state: dict, url: str) -> None:
     if value := origin(url):
         if value not in state.setdefault("origins", []):
             state["origins"].append(value)
-            save_state(session, state)
+            save_state(state)
 
 
 def top_contexts(state: dict) -> list[dict]:
@@ -857,14 +780,14 @@ walk(document);return found.slice(0,200);
             pass
 
 
-def state_result(session: str, state: dict) -> dict:
+def state_result(state: dict) -> dict:
     context = current_context(state)
     items: list[dict] = []
     enumerate_context(state, context, [], items)
     state["elements"] = [{"id": item["id"], "context": item["context"], "frame": item["frame"]} for item in items]
-    save_state(session, state)
+    save_state(state)
     url = context["url"]
-    remember_origin(session, state, url)
+    remember_origin(state, url)
     return {"url": url, "title": execute(state, "return document.title", context=context["context"]), "elements": [
         {"index": i, "tag": item["tag"], "type": item["type"], "text": item["text"], "frame": item["frame"]}
         for i, item in enumerate(items)
@@ -1001,22 +924,11 @@ def emit(value, json_output: bool, text: str | None = None) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--session", default=os.environ.get("FIREFOX_USE_SESSION", "default"))
-    parser.add_argument("--profile")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--headed", action="store_true", help="Compatibility flag; Firefox is headed by default")
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("start", "state", "back", "sessions", "doctor", "selftest"):
+    for name in ("start", "state", "back", "close", "doctor", "selftest"):
         commands.add_parser(name)
-    close = commands.add_parser("close"); close.add_argument("--all", action="store_true")
-    profile = commands.add_parser("profile")
-    profile_commands = profile.add_subparsers(dest="profile_action", required=True)
-    profile_commands.add_parser("list")
-    profile_create = profile_commands.add_parser("create")
-    profile_create.add_argument("name")
-    profile_create.add_argument("--from", dest="source")
-    profile_delete = profile_commands.add_parser("delete")
-    profile_delete.add_argument("name")
     for name, argument in {"open":"url", "click":"index", "type":"text", "keys":"text", "eval":"code", "screenshot":"path", "switch":"index"}.items():
         sub = commands.add_parser(name); sub.add_argument(argument, type=int if argument == "index" else str)
     close_tab = commands.add_parser("close-tab"); close_tab.add_argument("index", type=int, nargs="?")
@@ -1037,7 +949,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def selftest() -> dict:
-    assert safe_session("a/b") == "a_b"
     assert origin("https://example.com/a") == "https://example.com"
     assert KEYS["Enter"] == "\ue007"
     assert local_value({"sharedId": "node-1"}) == {"sharedId": "node-1"}
@@ -1048,70 +959,69 @@ def selftest() -> dict:
     })["sameSite"] == "Lax"
     assert cookie_path_matches("/docs/page", "/docs") and not cookie_path_matches("/docs-old", "/docs")
     parser = build_parser()
-    assert parser.parse_args(["--session", "x", "open", "about:blank"]).session == "x"
-    created = parser.parse_args(["profile", "create", "work", "--from", "default-release"])
-    assert created.profile_action == "create" and created.source == "default-release"
-    assert validate_profile_name("work.1") == "work.1"
+    commands = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction)).choices
+    assert not {"sessions", "profile"} & commands.keys()
+    assert "session" not in {action.dest for action in parser._actions}
+    assert "profile" not in {action.dest for action in parser._actions}
+    assert "all" not in {action.dest for action in commands["close"]._actions}
     if sys.platform.startswith("linux"):
         zombie = subprocess.Popen([sys.executable, "-c", "pass"])
         time.sleep(0.1)
         assert not process_alive(zombie.pid)
         zombie.wait()
-    try:
-        validate_profile_name("../unsafe")
-    except RuntimeError:
-        pass
-    else:
-        raise AssertionError("unsafe profile name accepted")
-    previous = {key: os.environ.get(key) for key in ("FIREFOX_BINARY", "FIREFOX_STATE_HOME", "BROWSER_USE_HOME", "FIREFOX_PROFILE_HOME", "FIREFOX_PROFILES_INI")}
+    previous = {key: os.environ.get(key) for key in (
+        "FIREFOX_BINARY", "FIREFOX_PROFILE_HOME", "FIREFOX_STATE_HOME", "BROWSER_USE_HOME", "FIREFOX_USE_SESSION",
+    )}
     try:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             binary = root / "firefox"
-            binary.touch()
-            source = root / "native"
-            source.mkdir()
-            (source / "marker.txt").write_text("native", encoding="utf-8")
-            ini = root / "profiles.ini"
-            ini.write_text("[Profile0]\nName=default-release\nIsRelative=0\nPath=" + str(source) + "\nDefault=1\n", encoding="utf-8")
+            binary.write_text("#!/bin/sh\nexec /snap/bin/firefox \"$@\"\n", encoding="utf-8")
             os.environ.update({
                 "FIREFOX_BINARY": str(binary),
-                "FIREFOX_STATE_HOME": str(root / "state"),
                 "FIREFOX_PROFILE_HOME": str(root / "profiles"),
-                "FIREFOX_PROFILES_INI": str(ini),
+                "FIREFOX_STATE_HOME": str(root / "ignored-state"),
+                "BROWSER_USE_HOME": str(root / "ignored-home"),
+                "FIREFOX_USE_SESSION": "ignored-session",
             })
             assert find_firefox() == str(binary)
-            assert home() == root / "state"
-            created_profile = create_managed_profile("work", "default-release")
-            assert Path(created_profile["path"], "marker.txt").read_text(encoding="utf-8") == "native"
-            assert resolve_profile(None) == "automation"
-            create_managed_profile("social", None)
-            assert resolve_profile(None) == "automation"
-            mark_managed_profile_used("work")
-            assert resolve_profile(None) == "automation"
-            assert resolve_profile("social") == "social"
-            assert delete_managed_profile("social") == {"deleted": "social"}
-            assert delete_managed_profile("work") == {"deleted": "work"}
-            assert resolve_profile(None) == "automation"
-            assert managed_profiles()[0]["name"] == "automation"
-            assert source.joinpath("marker.txt").read_text(encoding="utf-8") == "native"
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "original").mkdir()
-            (root / "work").mkdir()
-            groups = root / "Profile Groups"
-            groups.mkdir()
-            ini = root / "profiles.ini"
-            ini.write_text("[Profile0]\nName=default\nIsRelative=1\nPath=work\nDefault=1\nStoreID=test\n", encoding="utf-8")
-            with sqlite3.connect(groups / "test.sqlite") as connection:
-                connection.execute("CREATE TABLE Profiles (id INTEGER PRIMARY KEY, path TEXT, name TEXT)")
-                connection.executemany("INSERT INTO Profiles (path, name) VALUES (?, ?)", [
-                    ("original", "Original profile"), ("work", "Work"),
+            assert home() == Path(tempfile.gettempdir()) / "browser-use-firefox"
+            assert firefox_installation() == "snap"
+            profile = ensure_automation_profile()
+            runtime = {"browser_pid": 1, "broker_pid": 2, "broker_port": 3, "broker_token": "x", "origins": ["https://example.com"]}
+            write_private_json(runtime_path(), runtime)
+            assert runtime_path().stat().st_mode & 0o777 == 0o600
+            assert cache_from_runtime(runtime)["elements"] == []
+            with command_mutex():
+                pass
+            digest = hashlib.sha256(str(profile).encode()).hexdigest()[:16]
+            mutex = home() / "locks" / f"{digest}.lock"
+            write_private_json(mutex, {"pid": os.getpid()})
+            try:
+                with command_mutex(timeout=0.1):
+                    raise AssertionError("living mutex was ignored")
+            except RuntimeError:
+                pass
+            mutex.unlink()
+            write_private_json(mutex, {"pid": 999999999})
+            with command_mutex():
+                assert read_json_file(mutex)["pid"] == os.getpid()
+            assert not mutex.exists()
+            if sys.platform.startswith("linux"):
+                process = subprocess.Popen([
+                    sys.executable, "-c", "import time; time.sleep(30)",
+                    "--remote-debugging-port", "1", "-profile", str(profile),
                 ])
-            os.environ["FIREFOX_PROFILES_INI"] = str(ini)
-            assert [item["name"] for item in firefox_profiles()] == ["Original profile", "Work"]
-            assert native_profile("Work")["path"] == str(root / "work")
-            assert native_profile("default")["name"] == "Work"
+                try:
+                    (profile / "lock").symlink_to(f"localhost:+{process.pid}")
+                    assert verified_browser_process(process.pid, profile)
+                    assert not verified_browser_process(process.pid, root / "wrong")
+                    terminate_browser(process.pid, profile)
+                    assert not profile_locked(profile)
+                finally:
+                    if process_alive(process.pid):
+                        process.terminate()
+                    process.wait(timeout=5)
     finally:
         for key, value in previous.items():
             if value is None:
@@ -1121,38 +1031,26 @@ def selftest() -> dict:
     return {"ok": True}
 
 
-def main() -> None:
-    if len(sys.argv) > 1 and sys.argv[1] == "_broker":
-        parser = argparse.ArgumentParser(add_help=False)
-        parser.add_argument("--websocket-url", required=True)
-        parser.add_argument("--port", type=int, required=True)
-        parser.add_argument("--token", required=True)
-        args = parser.parse_args(sys.argv[2:])
-        asyncio.run(run_broker(args.websocket_url, args.port, args.token)); return
-    args = build_parser().parse_args()
-    if args.command == "selftest":
-        emit(selftest(), args.json, "ok"); return
-    if args.command == "profile":
-        if args.profile_action == "list":
-            emit(firefox_profiles() + managed_profiles(), args.json)
-        elif args.profile_action == "create":
-            result = create_managed_profile(args.name, args.source)
-            emit(result, args.json, f"Created managed Firefox profile: {args.name}")
-        elif args.profile_action == "delete":
-            result = delete_managed_profile(args.name)
-            emit(result, args.json, f"Deleted managed Firefox profile: {args.name}")
-        return
+def run_command(args) -> None:
     if args.command == "doctor":
         firefox = find_firefox()
         gui_ready = headed_ready()
+        state = load_state() or runtime_state()
+        browser_pid = state.get("browser_pid", state.get("pid")) or firefox_lock_pid(automation_profile())
+        running = process_alive(browser_pid)
+        broker_alive = driver_alive(state)
+        orphaned = running and not broker_alive
         result = {
             "ok": bool(firefox and (headless_enabled() or gui_ready)),
             "firefox": firefox, "firefoxVersion": version(firefox),
             "protocol": "WebDriver BiDi", "transport": "WebSocket",
-            "installation": firefox_installation(), "profileHome": str(profile_home()),
-            "nativeProfiles": len(firefox_profiles()), "managedProfiles": len(managed_profiles()),
+            "installation": firefox_installation(), "profilePath": str(automation_profile()),
+            "running": running, "brokerAlive": broker_alive, "orphaned": orphaned,
+            "browserPid": browser_pid,
             "headless": headless_enabled(), "headedReady": gui_ready,
         }
+        if orphaned:
+            result["repair"] = "Run any Firefox command to verify and recover the orphan, or run close."
         emit(result, args.json)
         if not firefox:
             if args.json:
@@ -1163,29 +1061,19 @@ def main() -> None:
                 raise SystemExit(1)
             raise RuntimeError("Firefox headed mode requires DISPLAY or WAYLAND_DISPLAY on Linux.")
         return
-    if args.command == "sessions":
-        sessions = []
-        for path in sorted(home().glob("*.json")):
-            state = load_state(path.stem)
-            sessions.append({
-                "name": path.stem, "running": driver_alive(state),
-                "profile": state.get("profile"), "profileKind": state.get("profile_kind"),
-            })
-        emit(sessions, args.json); return
     if args.command == "close":
-        names = [path.stem for path in home().glob("*.json")] if args.all else [args.session]
-        for name in names: stop(name, load_state(name))
-        emit({"closed": names}, args.json, f"Closed: {', '.join(names) if names else 'none'}"); return
+        stop()
+        emit({"closed": "automation"}, args.json, "Closed: automation"); return
 
-    state = active(args.session, args.profile)
+    state = active()
     if args.command == "start":
-        emit({"browser": "firefox", "session": args.session}, args.json, "firefox"); return
+        emit({"browser": "firefox", "profile": "automation", "browserPid": state["browser_pid"]}, args.json, "firefox"); return
     if args.command == "open":
         context = current_context(state)
         result = call(state, "browsingContext.navigate", {"context": context["context"], "url": args.url, "wait": "complete"})
-        remember_origin(args.session, state, result["url"]); emit({"url": result["url"]}, args.json, result["url"])
+        remember_origin(state, result["url"]); emit({"url": result["url"]}, args.json, result["url"])
     elif args.command == "state":
-        result = state_result(args.session, state)
+        result = state_result(state)
         lines = [f"URL: {result['url']}", f"Title: {result['title']}"] + [f"[{e['index']}] <{e['tag']}{' type='+e['type'] if e['type'] else ''}> {e['text']}" for e in result["elements"]]
         emit(result, args.json, "\n".join(lines))
     elif args.command == "back":
@@ -1207,10 +1095,10 @@ def main() -> None:
     elif args.command in {"hover", "dblclick", "rightclick"}:
         count = 0 if args.command == "hover" else (2 if args.command == "dblclick" else 1); pointer_action(state, element(state, args.index), 2 if args.command == "rightclick" else 0, count); emit({args.command: args.index}, args.json)
     elif args.command == "switch":
-        contexts = top_contexts(state); selected = contexts[args.index]; call(state, "browsingContext.activate", {"context": selected["context"]}); state["active_context"] = selected["context"]; state["elements"] = []; save_state(args.session, state); emit({"tab": args.index, "url": selected["url"]}, args.json)
+        contexts = top_contexts(state); selected = contexts[args.index]; call(state, "browsingContext.activate", {"context": selected["context"]}); state["active_context"] = selected["context"]; state["elements"] = []; save_state(state); emit({"tab": args.index, "url": selected["url"]}, args.json)
     elif args.command == "close-tab":
         contexts = top_contexts(state); selected = contexts[args.index] if args.index is not None else current_context(state); call(state, "browsingContext.close", {"context": selected["context"]}); remaining = [] if len(contexts) == 1 else top_contexts(state)
-        if remaining: call(state, "browsingContext.activate", {"context": remaining[0]["context"]}); state["active_context"] = remaining[0]["context"]; state["elements"] = []; save_state(args.session, state)
+        if remaining: call(state, "browsingContext.activate", {"context": remaining[0]["context"]}); state["active_context"] = remaining[0]["context"]; state["elements"] = []; save_state(state)
         emit({"remainingTabs": len(remaining)}, args.json)
     elif args.command == "eval":
         emit(execute(state, "return eval(arguments[0])", [args.code]), args.json)
@@ -1253,6 +1141,21 @@ def main() -> None:
             cookies = all_session_cookies(state); Path(args.path).write_text(json.dumps(cookies, indent=2), encoding="utf-8"); emit({"path": args.path, "count": len(cookies)}, args.json)
         elif args.cookie_command == "import":
             cookies = json.loads(Path(args.path).read_text(encoding="utf-8")); count = import_cookies(state, cookies); emit({"imported": count}, args.json)
+
+
+def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == "_broker":
+        parser = argparse.ArgumentParser(add_help=False)
+        parser.add_argument("--websocket-url", required=True)
+        parser.add_argument("--port", type=int, required=True)
+        parser.add_argument("--token", required=True)
+        args = parser.parse_args(sys.argv[2:])
+        asyncio.run(run_broker(args.websocket_url, args.port, args.token)); return
+    args = build_parser().parse_args()
+    if args.command == "selftest":
+        emit(selftest(), args.json, "ok"); return
+    with command_mutex():
+        run_command(args)
 
 
 if __name__ == "__main__":

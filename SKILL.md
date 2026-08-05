@@ -158,7 +158,8 @@ Firefox location. Do not claim to attach to a normally-open Firefox instance.
 Control cache and command mutex files live under `/tmp/browser-use-firefox`. Private
 `runtime.json` lives beside the managed profile and allows cache recovery without
 restarting a healthy browser. Set only `FIREFOX_PROFILE_HOME` to relocate `automation`
-or isolate a test. Native Firefox profiles are never discovered, cloned, or modified.
+or isolate a test. For Firefox Snap, it must stay inside `~/snap/firefox/common`; never
+set it to `/tmp`. Native Firefox profiles are never discovered, cloned, or modified.
 
 Firefox and Chromium both enforce a native profile lock. The Firefox helper additionally
 holds a startup/command mutex for at most one CLI command, so concurrent commands wait

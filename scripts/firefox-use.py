@@ -290,11 +290,21 @@ def headed_ready() -> bool:
 
 
 def profile_home() -> Path:
+    installation = firefox_installation()
     if configured := os.environ.get("FIREFOX_PROFILE_HOME"):
-        root = Path(configured).expanduser()
-    elif firefox_installation() == "snap":
+        root = Path(configured).expanduser().resolve()
+        if installation == "snap":
+            allowed = (Path.home() / "snap" / "firefox" / "common").resolve()
+            try:
+                root.relative_to(allowed)
+            except ValueError:
+                raise RuntimeError(
+                    f"Firefox Snap cannot use FIREFOX_PROFILE_HOME={root}. "
+                    f"Use a directory inside {allowed}, or unset FIREFOX_PROFILE_HOME."
+                ) from None
+    elif installation == "snap":
         root = Path.home() / "snap" / "firefox" / "common" / ".browser-use-profiles"
-    elif firefox_installation() == "flatpak":
+    elif installation == "flatpak":
         root = Path.home() / ".var" / "app" / "org.mozilla.firefox" / ".browser-use-profiles"
     else:
         root = Path(tempfile.gettempdir()) / "browser-use-firefox" / "profiles"
@@ -331,7 +341,8 @@ def ensure_automation_profile() -> Path:
 
 
 def profile_locked(path: Path) -> bool:
-    return any((path / name).exists() or (path / name).is_symlink() for name in PROFILE_LOCKS)
+    names = ("lock",) if sys.platform.startswith("linux") else PROFILE_LOCKS
+    return any((path / name).exists() or (path / name).is_symlink() for name in names)
 
 
 def read_json_file(path: Path) -> dict:
@@ -987,7 +998,18 @@ def selftest() -> dict:
             assert find_firefox() == str(binary)
             assert home() == Path(tempfile.gettempdir()) / "browser-use-firefox"
             assert firefox_installation() == "snap"
+            try:
+                profile_home()
+            except RuntimeError as error:
+                assert "Firefox Snap cannot use FIREFOX_PROFILE_HOME" in str(error)
+            else:
+                raise AssertionError("Firefox Snap accepted a profile outside its sandbox")
+            binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            assert firefox_installation() == "native"
             profile = ensure_automation_profile()
+            if sys.platform.startswith("linux"):
+                (profile / ".parentlock").touch()
+                assert not profile_locked(profile)
             runtime = {"browser_pid": 1, "broker_pid": 2, "broker_port": 3, "broker_token": "x", "origins": ["https://example.com"]}
             write_private_json(runtime_path(), runtime)
             assert runtime_path().stat().st_mode & 0o777 == 0o600

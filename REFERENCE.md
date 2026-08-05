@@ -208,6 +208,9 @@ Firefox sandbox directory on Snap/Flatpak, or `/tmp/browser-use-firefox/profiles
 native Firefox and Windows. `close` removes only runtime/control files; profile data,
 cookies, and login state remain.
 
+Firefox Snap overrides must remain inside `~/snap/firefox/common`; `/tmp` is in a
+different Snap mount namespace and is rejected before Firefox launches.
+
 The fixed cache and per-profile command mutex live under `/tmp/browser-use-firefox`.
 `runtime.json` is mode `0600` beside `automation` and records the browser PID, broker,
 Remote Agent port, BiDi session, and startup time. If cache disappears while the broker

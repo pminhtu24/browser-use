@@ -15,7 +15,7 @@ case "$BROWSER" in
   firefox)
     PYTHON="${BROWSER_USE_PYTHON:-$(command -v python3 || command -v python || true)}"
     [ -n "$PYTHON" ] || { echo "Python not found. Set BROWSER_USE_PYTHON." >&2; exit 3; }
-    exec "$PYTHON" "$(dirname "$0")/firefox-use.py" start
+    exec "$PYTHON" "$(dirname "$0")/firefox-use.py" --headed start
     ;;
   chrome|edge|coccoc|brave|opera) : ;;
   *) echo "Usage: $0 <chrome|edge|coccoc|brave|opera|firefox> [port]" >&2; exit 1 ;;

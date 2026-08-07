@@ -96,7 +96,9 @@ path and tell them where it is; expect the model itself can't analyse it:
 path — that dumps megabytes of base64.)
 
 Act by index: `browser-use click 5`, `browser-use input 3 "text"`. Browser stays open.
-If a command fails, run `browser-use close` to clear a broken session, then retry.
+Keep the browser open after commands and after the task completes. If a command fails,
+diagnose it and retry with the same session; if blocked, report the error and ask the
+user. Never close a browser, window, or tab unless the user explicitly asks.
 
 ## Chromium everyday commands
 
@@ -113,7 +115,7 @@ browser-use select <index> "opt"  # choose a dropdown option
 browser-use eval "js code"        # run JS in the page, return result
 browser-use get text <index>      # read element text
 browser-use wait text "Loaded"    # wait for text / selector
-browser-use close                 # close browser + stop daemon
+browser-use close                 # close browser + stop daemon, only when explicitly requested
 ```
 
 ## Chromium tips
@@ -122,7 +124,7 @@ browser-use close                 # close browser + stop daemon
 2. **Always run `state`** to get fresh indices before clicking/typing.
 3. **Chain with `&&`** when you don't need intermediate output.
 4. **`--headed`** shows the window; aliases: `bu`.
-5. **`browser-use close`** when done.
+5. **Keep the browser open** unless the user explicitly asks to close it.
 
 ## Firefox workflow
 
@@ -202,7 +204,7 @@ scripts/firefox-use.py get text 3
 scripts/firefox-use.py get html --selector main
 scripts/firefox-use.py input 4 "browser-use"
 scripts/firefox-use.py screenshot ./shot.png
-scripts/firefox-use.py close
+scripts/firefox-use.py close  # only when explicitly requested
 ```
 
 Put global options before the command: `--session NAME`, `--profile NAME`, or `--json`.

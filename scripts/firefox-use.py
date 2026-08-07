@@ -669,7 +669,7 @@ def element(state: dict, index: int) -> dict:
 
 
 def enumerate_context(state: dict, frame: list[str], output: list[dict], depth: int = 0) -> None:
-    items = execute(state, """
+    items = execute(state, r"""
 const found=[];
 const visible=e=>{const r=e.getBoundingClientRect(),s=getComputedStyle(e);return r.width>0&&r.height>0&&s.visibility!=='hidden'&&s.display!=='none'};
 const walk=root=>{for(const e of root.querySelectorAll('a,button,input,textarea,select,[role="button"],[role="link"],[contenteditable="true"],[tabindex]:not([tabindex="-1"])'))if(visible(e))found.push({element:e,tag:e.tagName.toLowerCase(),type:e.type||'',text:(e.innerText||e.value||e.getAttribute('aria-label')||e.placeholder||'').trim().replace(/\s+/g,' ').slice(0,160)});for(const e of root.querySelectorAll('*'))if(e.shadowRoot)walk(e.shadowRoot)};

@@ -381,8 +381,8 @@ def delete_managed_profile(name: str) -> dict:
     return {"deleted": name}
 
 
-def headless_enabled(override: bool | None = None) -> bool:
-    return override if override is not None else os.environ.get("FIREFOX_USE_HEADLESS", "").lower() in {"1", "true", "yes"}
+def headless_enabled() -> bool:
+    return os.environ.get("FIREFOX_USE_HEADLESS", "").lower() in {"1", "true", "yes"}
 
 
 def headed_ready() -> bool:
@@ -539,16 +539,11 @@ def stop(session: str, state: dict) -> None:
     state_path(session).unlink(missing_ok=True)
 
 
-def start(session: str, profile: str | None = None, headless: bool | None = None) -> dict:
-    requested_headless = headless_enabled(headless)
+def start(session: str, profile: str | None = None) -> dict:
     current = load_state(session)
     if current and driver_alive(current):
         if profile and current.get("profile") != profile:
             raise RuntimeError(f"Session {session} is already running with another profile.")
-        if headless is not None and current.get("headless") != requested_headless:
-            current_mode = "unknown (legacy)" if current.get("headless") is None else "headless" if current["headless"] else "headed"
-            requested_mode = "headless" if requested_headless else "headed"
-            raise RuntimeError(f"Session {session} is already running {current_mode}; use another session or explicitly close it before requesting {requested_mode}.")
         return current
     if current:
         stop(session, current)
@@ -560,11 +555,11 @@ def start(session: str, profile: str | None = None, headless: bool | None = None
         raise RuntimeError("geckodriver not found. Install it or set GECKODRIVER.")
     if not firefox:
         raise RuntimeError("Firefox not found after PATH, registry, and standard-path discovery. Set FIREFOX_BINARY for a non-standard install.")
-    if not requested_headless and not headed_ready():
+    if not headless_enabled() and not headed_ready():
         raise RuntimeError(
             "Firefox headed mode requires DISPLAY or WAYLAND_DISPLAY on Linux. "
             "Forward DISPLAY, XAUTHORITY, and DBUS_SESSION_BUS_ADDRESS from the desktop session, "
-            "Use --headless only for tests, user-approved unattended jobs, or an explicit user opt-out."
+            "or set FIREFOX_USE_HEADLESS=true for tests."
         )
 
     profile_kind = None
@@ -607,7 +602,7 @@ def start(session: str, profile: str | None = None, headless: bool | None = None
             raise RuntimeError("geckodriver did not become ready")
 
         browser_args = []
-        if requested_headless:
+        if headless_enabled():
             browser_args.append("-headless")
         if profile_path:
             browser_args.extend(("-profile", str(profile_path)))
@@ -619,7 +614,7 @@ def start(session: str, profile: str | None = None, headless: bool | None = None
             "pid": process.pid, "port": port, "session_id": value["sessionId"],
             "elements": [], "origins": [], "profile": profile,
             "profile_kind": profile_kind, "profile_path": str(profile_path) if profile_path else None,
-            "profile_clone": str(clone) if clone else None, "headless": requested_headless,
+            "profile_clone": str(clone) if clone else None,
         }
         if profile_kind == "managed":
             mark_managed_profile_used(profile)
@@ -636,14 +631,14 @@ def start(session: str, profile: str | None = None, headless: bool | None = None
         raise
 
 
-def active(session: str, profile: str | None = None, headless: bool | None = None) -> dict:
-    state = start(session, profile, headless)
+def active(session: str, profile: str | None = None) -> dict:
+    state = start(session, profile)
     try:
         call(state, "GET", "/url")
         return state
     except RuntimeError:
         stop(session, state)
-        return start(session, profile, headless)
+        return start(session, profile)
 
 
 def origin(url: str) -> str | None:
@@ -800,10 +795,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--session", default=os.environ.get("FIREFOX_USE_SESSION", "default"))
     parser.add_argument("--profile")
     parser.add_argument("--json", action="store_true")
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--headed", dest="headless", action="store_const", const=False, help="Force a visible Firefox window")
-    mode.add_argument("--headless", dest="headless", action="store_const", const=True, help="Explicitly run Firefox without a window")
-    parser.set_defaults(headless=None)
+    parser.add_argument("--headed", action="store_true", help="Compatibility flag; Firefox is headed by default")
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("start", "state", "back", "sessions", "doctor", "selftest"):
         commands.add_parser(name)
@@ -841,8 +833,6 @@ def selftest() -> dict:
     assert KEYS["Enter"] == "\ue007"
     parser = build_parser()
     assert parser.parse_args(["--session", "x", "open", "about:blank"]).session == "x"
-    assert parser.parse_args(["--headed", "start"]).headless is False
-    assert parser.parse_args(["--headless", "start"]).headless is True
     created = parser.parse_args(["profile", "create", "work", "--from", "default-release"])
     assert created.profile_action == "create" and created.source == "default-release"
     assert validate_profile_name("work.1") == "work.1"
@@ -857,10 +847,8 @@ def selftest() -> dict:
         pass
     else:
         raise AssertionError("unsafe profile name accepted")
-    previous = {key: os.environ.get(key) for key in ("FIREFOX_BINARY", "FIREFOX_STATE_HOME", "BROWSER_USE_HOME", "FIREFOX_PROFILE_HOME", "FIREFOX_PROFILES_INI", "FIREFOX_USE_HEADLESS")}
+    previous = {key: os.environ.get(key) for key in ("FIREFOX_BINARY", "FIREFOX_STATE_HOME", "BROWSER_USE_HOME", "FIREFOX_PROFILE_HOME", "FIREFOX_PROFILES_INI")}
     try:
-        os.environ["FIREFOX_USE_HEADLESS"] = "true"
-        assert headless_enabled() and not headless_enabled(False) and headless_enabled(True)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             binary = root / "firefox"
@@ -934,21 +922,20 @@ def main() -> None:
     if args.command == "doctor":
         firefox, gecko = find_firefox(), find_geckodriver()
         gui_ready = headed_ready()
-        headless = headless_enabled(args.headless)
         result = {
-            "ok": bool(firefox and gecko and (headless or gui_ready)),
+            "ok": bool(firefox and gecko and (headless_enabled() or gui_ready)),
             "firefox": firefox, "firefoxVersion": version(firefox),
             "geckodriver": gecko, "geckodriverVersion": version(gecko),
             "installation": firefox_installation(), "profileHome": str(profile_home()),
             "nativeProfiles": len(firefox_profiles()), "managedProfiles": len(managed_profiles()),
-            "headless": headless, "headedReady": gui_ready,
+            "headless": headless_enabled(), "headedReady": gui_ready,
         }
         emit(result, args.json)
         if not firefox or not gecko:
             if args.json:
                 raise SystemExit(1)
             raise RuntimeError("Firefox and geckodriver are required.")
-        if not headless and not gui_ready:
+        if not headless_enabled() and not gui_ready:
             if args.json:
                 raise SystemExit(1)
             raise RuntimeError("Firefox headed mode requires DISPLAY or WAYLAND_DISPLAY on Linux.")
@@ -967,7 +954,7 @@ def main() -> None:
         for name in names: stop(name, load_state(name))
         emit({"closed": names}, args.json, f"Closed: {', '.join(names) if names else 'none'}"); return
 
-    state = active(args.session, args.profile, args.headless)
+    state = active(args.session, args.profile)
     if args.command == "start":
         emit({"browser": "firefox", "session": args.session}, args.json, "firefox"); return
     if args.command == "open":

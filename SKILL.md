@@ -129,11 +129,6 @@ browser-use close                 # close browser + stop daemon, only when expli
 ## Firefox workflow
 
 Route Firefox through the bundled WebDriver helper, never through Chromium CDP:
-Every user-initiated interactive task must use a visible, headed Firefox window.
-Headless Firefox is allowed only for automation tests/CI, a cron or scheduler job the
-user explicitly approved as unattended, or an explicit request to run headless/in the
-background/without a window. Never infer headless mode from a missing display or from
-the fact that a task uses automation; ask the user if their intent is unclear.
 
 ```bash
 scripts/use-browser.sh firefox
@@ -212,10 +207,8 @@ scripts/firefox-use.py screenshot ./shot.png
 scripts/firefox-use.py close  # only when explicitly requested
 ```
 
-Put global options before the command: `--session NAME`, `--profile NAME`, `--headed`,
-`--headless`, or `--json`. The launch helpers force `--headed`, even if a stale
-`FIREFOX_USE_HEADLESS=true` remains in the environment. For an allowed unattended case,
-use explicit `--headless`; the environment variable remains only for existing test/CI jobs.
+Put global options before the command: `--session NAME`, `--profile NAME`, or `--json`.
+Firefox is headed by default; set `FIREFOX_USE_HEADLESS=true` only for automation tests.
 On Linux, headed mode requires `DISPLAY` or `WAYLAND_DISPLAY`.
 
 ## Troubleshooting

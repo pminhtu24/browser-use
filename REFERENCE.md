@@ -155,8 +155,7 @@ Global options must precede the command:
 | `--session NAME` | Select a persistent named session (default `default`) |
 | `--profile NAME` | Use a managed profile, or temporarily clone a closed native profile |
 | `--json` | Emit machine-readable JSON |
-| `--headed` | Force a visible Firefox window; overrides `FIREFOX_USE_HEADLESS` |
-| `--headless` | Explicitly run without a window for approved unattended use |
+| `--headed` | Compatibility flag; Firefox is already visible by default |
 
 ```bash
 # Browser/session lifecycle
@@ -204,11 +203,6 @@ scripts/firefox-use.py cookies export <file.json>
 scripts/firefox-use.py cookies import <file.json>
 scripts/firefox-use.py screenshot <path.png>
 ```
-
-Firefox defaults to headed. Use headless only for tests/CI, user-approved cron or
-scheduler jobs, or when the user explicitly requests no visible window. The legacy
-`FIREFOX_USE_HEADLESS` environment variable remains supported, while an explicit CLI
-flag takes precedence.
 
 `state` includes visible interactive elements from the document, open shadow roots,
 and accessible iframes. Its indices expire when the DOM changes. Cookie export/clear

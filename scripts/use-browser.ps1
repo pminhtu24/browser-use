@@ -43,7 +43,7 @@ switch ($Browser) {
       @('python', 'python3', 'py') | Where-Object { Get-Command $_ -ErrorAction SilentlyContinue } | Select-Object -First 1
     }
     if (-not $python) { Write-Error 'Python not found. Set BROWSER_USE_PYTHON.'; exit 3 }
-    & $python (Join-Path $PSScriptRoot 'firefox-use.py') --headed start
+    & $python (Join-Path $PSScriptRoot 'firefox-use.py') start
     exit $LASTEXITCODE
   }
   'chrome'  { $exe = Find-Exe @("$pf\Google\Chrome\Application\chrome.exe", "$pf86\Google\Chrome\Application\chrome.exe", "$local\Google\Chrome\Application\chrome.exe") 'chrome.exe' }

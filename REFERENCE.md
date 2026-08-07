@@ -204,6 +204,12 @@ scripts/firefox-use.py cookies import <file.json>
 scripts/firefox-use.py screenshot <path.png>
 ```
 
+Firefox `wait --timeout` accepts 1–30000 milliseconds. On failure, keep the same
+Firefox window/session/tab open. CAPTCHA, human verification, access denial, login/2FA,
+and rate limiting are not retryable; report them to the user without switching browsers.
+For transient navigation/network failures, retry the same operation at most twice and
+stop after 60 seconds total. Refresh `state` once before retrying a stale element.
+
 `state` includes visible interactive elements from the document, open shadow roots,
 and accessible iframes. Its indices expire when the DOM changes. Cookie export/clear
 covers origins visited by that Firefox session.

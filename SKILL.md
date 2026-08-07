@@ -145,6 +145,28 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\scripts\use-browser.p
 & "$env:BROWSER_USE_PYTHON" ".\scripts\firefox-use.py" state
 ```
 
+### Firefox failure, blocker, and retry policy (MANDATORY)
+
+Keep the Firefox window, session, and current tab open on every failure. Never run
+`close`, restart Firefox, open another tab, or switch to Chrome/Edge/another browser
+unless the user explicitly asks. A retry means repeating only the failed operation in
+the same Firefox session and tab; it never means restarting the task or changing browsers.
+
+- CAPTCHA, bot/human verification, access denied, login/2FA, or rate limiting: **0 retries**.
+  Stop immediately and ask the user to handle the blocker in the open Firefox window.
+- Stale element or changed DOM: run `state` once, use the fresh index, and retry once.
+- Firefox WebDriver unavailable: perform one health check/retry; never restart Firefox.
+- Navigation/network timeout: inspect `state`, URL, and title before retrying; retry at
+  most twice and stop after 60 seconds total for the same operation/error.
+- `wait` timeout: wait at most 30 seconds once. Do not issue the same wait again unless
+  `state` shows meaningful page progress.
+- Unknown or deterministic errors: diagnose once; if the same operation/error repeats,
+  stop instead of trying variants.
+
+When stopping, report the attempt count, error/blocker, current URL/title when
+available, that Firefox remains open, and the exact action needed from the user. After
+a CAPTCHA or other human checkpoint, continue only after the user confirms it is done.
+
 Before claiming Firefox is missing on Windows, run `doctor`. The helper automatically
 checks `FIREFOX_BINARY`, `PATH`, the Windows `App Paths` registry, `Program Files`, and
 standard per-user install paths. If discovery still fails, locate the binary, set
@@ -230,6 +252,8 @@ On Linux, headed mode requires `DISPLAY` or `WAYLAND_DISPLAY`.
 - On Windows x64, keep `vendor/geckodriver/windows-x64/geckodriver.exe` with the skill; never download a driver at runtime.
 - If a native profile is locked, close normal Firefox before cloning it.
 - If an element index is stale, run `state` again instead of retrying the old index.
+- CAPTCHA or access challenge → stop with Firefox open and ask the user to complete it; never switch browsers.
+- Repeated timeout/error → enforce the Firefox retry budget above and report the blocker instead of looping.
 
 ## Updating
 

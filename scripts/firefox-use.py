@@ -99,12 +99,12 @@ def request(port: int, method: str, path: str, payload: object | None = None, ti
     return value
 
 
-def call(state: dict, method: str, suffix: str, payload: object | None = None):
-    return request(state["port"], method, f"/session/{state['session_id']}{suffix}", payload)
+def call(state: dict, method: str, suffix: str, payload: object | None = None, timeout: float = 10):
+    return request(state["port"], method, f"/session/{state['session_id']}{suffix}", payload, timeout)
 
 
-def execute(state: dict, script: str, args: list | None = None):
-    return call(state, "POST", "/execute/sync", {"script": script, "args": args or []})
+def execute(state: dict, script: str, args: list | None = None, timeout: float = 10):
+    return call(state, "POST", "/execute/sync", {"script": script, "args": args or []}, timeout)
 
 
 def free_port() -> int:
@@ -633,12 +633,8 @@ def start(session: str, profile: str | None = None) -> dict:
 
 def active(session: str, profile: str | None = None) -> dict:
     state = start(session, profile)
-    try:
-        call(state, "GET", "/url")
-        return state
-    except RuntimeError:
-        stop(session, state)
-        return start(session, profile)
+    call(state, "GET", "/url")
+    return state
 
 
 def origin(url: str) -> str | None:
@@ -790,6 +786,13 @@ def emit(value, json_output: bool, text: str | None = None) -> None:
         print(value)
 
 
+def wait_timeout(value: str) -> int:
+    milliseconds = int(value)
+    if not 1 <= milliseconds <= 30_000:
+        raise argparse.ArgumentTypeError("timeout must be between 1 and 30000 milliseconds")
+    return milliseconds
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--session", default=os.environ.get("FIREFOX_USE_SESSION", "default"))
@@ -817,7 +820,7 @@ def build_parser() -> argparse.ArgumentParser:
         sub = commands.add_parser(name); sub.add_argument("index", type=int)
     scroll = commands.add_parser("scroll"); scroll.add_argument("direction", choices=("up", "down")); scroll.add_argument("--amount", type=int, default=600)
     get = commands.add_parser("get"); get.add_argument("kind", choices=("title", "url", "html", "text", "value", "attributes", "bbox")); get.add_argument("index", type=int, nargs="?"); get.add_argument("--selector")
-    wait = commands.add_parser("wait"); wait.add_argument("kind", choices=("text", "selector")); wait.add_argument("target"); wait.add_argument("--state", choices=("visible", "hidden", "attached", "detached"), default="visible"); wait.add_argument("--timeout", type=int, default=5000)
+    wait = commands.add_parser("wait"); wait.add_argument("kind", choices=("text", "selector")); wait.add_argument("target"); wait.add_argument("--state", choices=("visible", "hidden", "attached", "detached"), default="visible"); wait.add_argument("--timeout", type=wait_timeout, default=5000)
     cookies = commands.add_parser("cookies"); cookie_commands = cookies.add_subparsers(dest="cookie_command", required=True)
     cookie_get = cookie_commands.add_parser("get"); cookie_get.add_argument("--url")
     cookie_set = cookie_commands.add_parser("set"); cookie_set.add_argument("name"); cookie_set.add_argument("value"); cookie_set.add_argument("--domain"); cookie_set.add_argument("--path", default="/"); cookie_set.add_argument("--secure", action="store_true"); cookie_set.add_argument("--http-only", action="store_true"); cookie_set.add_argument("--same-site", choices=("Strict", "Lax", "None")); cookie_set.add_argument("--expires", type=int)
@@ -833,6 +836,14 @@ def selftest() -> dict:
     assert KEYS["Enter"] == "\ue007"
     parser = build_parser()
     assert parser.parse_args(["--session", "x", "open", "about:blank"]).session == "x"
+    assert parser.parse_args(["wait", "text", "ready", "--timeout", "30000"]).timeout == 30_000
+    for value in ("-1", "0", "30001"):
+        try:
+            wait_timeout(value)
+        except argparse.ArgumentTypeError:
+            pass
+        else:
+            raise AssertionError(f"invalid wait timeout accepted: {value}")
     created = parser.parse_args(["profile", "create", "work", "--from", "default-release"])
     assert created.profile_action == "create" and created.source == "default-release"
     assert validate_profile_name("work.1") == "work.1"
@@ -1006,10 +1017,10 @@ def main() -> None:
         deadline = time.monotonic() + args.timeout / 1000
         if args.kind == "text": script = "return !!document.body&&document.body.innerText.includes(arguments[0])"
         else: script = "const e=document.querySelector(arguments[0]);if(arguments[1]==='attached')return!!e;if(arguments[1]==='detached')return!e;const v=!!e&&e.getBoundingClientRect().width>0&&e.getBoundingClientRect().height>0&&getComputedStyle(e).visibility!=='hidden'&&getComputedStyle(e).display!=='none';return arguments[1]==='visible'?v:!v"
-        while time.monotonic() < deadline:
-            if execute(state, script, [args.target, args.state]): break
-            time.sleep(0.2)
-        else: raise RuntimeError(f"Timed out waiting for {args.kind}: {args.target}")
+        while (remaining := deadline - time.monotonic()) > 0:
+            if execute(state, script, [args.target, args.state], timeout=max(0.05, min(1, remaining))): break
+            time.sleep(min(0.2, max(0, deadline - time.monotonic())))
+        else: raise RuntimeError(f"Timed out after {args.timeout}ms waiting for {args.kind}: {args.target}")
         emit({"found": args.target}, args.json)
     elif args.command == "cookies":
         if args.cookie_command == "get": result = with_url(state, args.url, lambda: call(state, "GET", "/cookie")); emit(result, args.json)

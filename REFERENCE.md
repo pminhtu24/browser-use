@@ -128,8 +128,10 @@ no runtime download, installation, `PATH` change, or administrator access.
 ### Windows Firefox discovery
 
 Run `doctor` before concluding Firefox is unavailable. It checks `FIREFOX_BINARY`,
-`PATH`, the Windows `App Paths` registry, `Program Files`, and standard per-user paths.
-For a non-standard or portable install, recover with a process-local override:
+the last valid cached result, standard locations on drive C, the Windows `App Paths`
+registry, and then `PATH`. A successful result is cached in the Firefox state directory
+and revalidated before reuse. For a non-standard or portable install, recover with a
+process-local override:
 
 ```powershell
 & "$env:BROWSER_USE_PYTHON" ".\scripts\firefox-use.py" doctor

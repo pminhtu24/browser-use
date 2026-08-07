@@ -113,17 +113,49 @@ def free_port() -> int:
         return sock.getsockname()[1]
 
 
+def remember_firefox(path: str) -> str:
+    path = str(Path(path).expanduser().resolve())
+    cache = home() / "firefox-binary.txt"
+    temporary = cache.with_suffix(".tmp")
+    try:
+        temporary.write_text(path, encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        temporary.replace(cache)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+    return path
+
+
 def find_firefox() -> str | None:
     if binary := os.environ.get("FIREFOX_BINARY"):
         if Path(binary).expanduser().is_file():
-            return str(Path(binary).expanduser())
+            return remember_firefox(binary)
         if found := shutil.which(binary):
-            return found
-    found = shutil.which("firefox") or shutil.which("firefox.exe")
-    if found:
-        return found
+            return remember_firefox(found)
+    cache = home() / "firefox-binary.txt"
+    try:
+        cached = cache.read_text(encoding="utf-8").strip()
+    except OSError:
+        cached = ""
+    if cached and Path(cached).is_file():
+        return cached
+    try:
+        cache.unlink(missing_ok=True)
+    except OSError:
+        pass
     if os.name == "nt":
         import winreg
+        candidates = [
+            r"C:\Program Files\Mozilla Firefox\firefox.exe",
+            r"C:\Program Files (x86)\Mozilla Firefox\firefox.exe",
+        ]
+        if local_app_data := os.environ.get("LOCALAPPDATA"):
+            candidates.extend((
+                os.path.join(local_app_data, "Mozilla Firefox", "firefox.exe"),
+                os.path.join(local_app_data, "Programs", "Mozilla Firefox", "firefox.exe"),
+            ))
+        if found := next((path for path in candidates if path and Path(path).is_file()), None):
+            return remember_firefox(found)
         key_name = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\firefox.exe"
         for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
             for view in (winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY):
@@ -131,19 +163,14 @@ def find_firefox() -> str | None:
                     with winreg.OpenKey(root, key_name, 0, winreg.KEY_READ | view) as key:
                         path = str(winreg.QueryValue(key, None)).strip('"')
                     if Path(path).is_file():
-                        return path
+                        return remember_firefox(path)
                 except OSError:
                     pass
-    candidates = [
-        "/Applications/Firefox.app/Contents/MacOS/firefox",
-        os.path.join(os.environ.get("PROGRAMFILES", ""), "Mozilla Firefox", "firefox.exe"),
-        os.path.join(os.environ.get("PROGRAMFILES(X86)", ""), "Mozilla Firefox", "firefox.exe"),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Mozilla Firefox", "firefox.exe"),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Mozilla Firefox", "firefox.exe"),
-        r"C:\Program Files\Mozilla Firefox\firefox.exe",
-        r"C:\Program Files (x86)\Mozilla Firefox\firefox.exe",
-    ]
-    return next((path for path in candidates if path and Path(path).is_file()), None)
+    if found := shutil.which("firefox") or shutil.which("firefox.exe"):
+        return remember_firefox(found)
+    if Path(path := "/Applications/Firefox.app/Contents/MacOS/firefox").is_file():
+        return remember_firefox(path)
+    return None
 
 
 def find_geckodriver() -> str | None:
@@ -876,6 +903,9 @@ def selftest() -> dict:
                 "FIREFOX_PROFILES_INI": str(ini),
             })
             assert find_firefox() == str(binary)
+            os.environ.pop("FIREFOX_BINARY")
+            assert find_firefox() == str(binary)
+            assert (root / "state" / "firefox-binary.txt").read_text(encoding="utf-8") == str(binary)
             assert home() == root / "state"
             created_profile = create_managed_profile("work", "default-release")
             assert Path(created_profile["path"], "marker.txt").read_text(encoding="utf-8") == "native"

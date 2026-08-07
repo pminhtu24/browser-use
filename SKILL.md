@@ -168,10 +168,11 @@ available, that Firefox remains open, and the exact action needed from the user.
 a CAPTCHA or other human checkpoint, continue only after the user confirms it is done.
 
 Before claiming Firefox is missing on Windows, run `doctor`. The helper automatically
-checks `FIREFOX_BINARY`, `PATH`, the Windows `App Paths` registry, `Program Files`, and
-standard per-user install paths. If discovery still fails, locate the binary, set
-`FIREFOX_BINARY` for the current process only, and rerun `doctor`; do not require a
-permanent environment variable for a standard installation.
+checks `FIREFOX_BINARY`, its last valid cached result, standard locations on drive C,
+the Windows `App Paths` registry, and then `PATH`. Successful discovery is cached under
+the Firefox state directory, so later launches do not repeat the search. If discovery
+still fails, locate the binary, set `FIREFOX_BINARY` for the current process only, and
+rerun `doctor`; do not require a permanent environment variable.
 
 Require installed Firefox. On Windows x64, use the bundled geckodriver without a
 download, installation, `PATH` change, or administrator access. `GECKODRIVER` may
